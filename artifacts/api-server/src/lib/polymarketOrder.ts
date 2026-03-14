@@ -71,7 +71,8 @@ function buildHmacSignature(
   body: string = ""
 ): string {
   const message = `${timestamp}${method}${path}${body}`;
-  return crypto.createHmac("sha256", secret).update(message).digest("base64");
+  const secretBuffer = Buffer.from(secret, "base64");
+  return crypto.createHmac("sha256", secretBuffer).update(message).digest("base64");
 }
 
 function buildApiHeaders(
