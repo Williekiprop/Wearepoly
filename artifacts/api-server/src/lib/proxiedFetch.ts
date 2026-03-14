@@ -13,9 +13,11 @@ let _runtimeUrl: string | null = null;
 let _agent: ProxyAgent | null = null;
 let _proxyFetch: typeof fetch | null = null;
 
-/** Strip trailing slash — undici ProxyAgent misparses URLs like http://host:port/ */
+/** Normalise proxy URL — strip trailing slash, convert tcp:// → http:// */
 function cleanUrl(url: string): string {
-  return url.trim().replace(/\/+$/, "");
+  return url.trim()
+    .replace(/^tcp:\/\//i, "http://")   // ngrok tcp:// tunnels are HTTP proxies
+    .replace(/\/+$/, "");               // strip trailing slashes
 }
 
 function getActiveUrl(): string | null {
