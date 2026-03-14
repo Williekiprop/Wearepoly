@@ -72,9 +72,10 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
     const currentPrice = parseFloat(ticker.c[0]);
     const rawCandles = ohlcJson.result.XXBTZUSD ?? [];
 
-    // Take last 60 closed candles, then patch the in-progress one with the live price.
+    // Take last 29 closed candles, then patch the in-progress one with the live price.
     // The last element from Kraken is the in-progress (open) candle.
-    const closedCandles = rawCandles.slice(0, -1).slice(-59);
+    // 29 closed + 1 live = 30 candles total = ~30 min window.
+    const closedCandles = rawCandles.slice(0, -1).slice(-29);
     const inProgressRaw = rawCandles[rawCandles.length - 1];
 
     const candles: BtcCandle[] = closedCandles.map(([time, open, high, low, close, , volume]) => ({
@@ -114,10 +115,8 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
       ? ((currentPrice - price5mAgo) / price5mAgo) * 100
       : 0;
 
-    // 1h change: compare current vs 60 candles back (60 × 1-min)
-    const price1hAgo = candles.length >= 60
-      ? candles[candles.length - 60].close
-      : candles[0]?.close ?? currentPrice;
+    // 1h change: compare current vs oldest available candle (up to 60 min)
+    const price1hAgo = candles[0]?.close ?? currentPrice;
     const change1h = price1hAgo > 0
       ? ((currentPrice - price1hAgo) / price1hAgo) * 100
       : 0;

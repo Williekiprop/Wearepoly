@@ -152,13 +152,13 @@ export default function Dashboard() {
   const isGeoblocked = (botData as any)?.lastSignal?.includes("BLOCKED");
   const proxyEnabled = (botData as any)?.proxyEnabled === true;
 
-  // Format data for chart
-  const chartData = btcData?.candles.map(c => ({
+  // Format data for chart — last 15 candles (15-min window)
+  const chartData = (btcData?.candles.slice(-15) ?? []).map(c => ({
     time: format(new Date(c.time), 'HH:mm'),
     close: c.close,
     volume: c.volume,
     isUp: c.close >= c.open
-  })) || [];
+  }));
 
   return (
     <div className="min-h-screen bg-background text-foreground p-4 md:p-6 lg:p-8 space-y-6 max-w-[1600px] mx-auto">
@@ -763,7 +763,7 @@ export default function Dashboard() {
         <div className="space-y-6">
           <TerminalCard className="h-full flex flex-col">
             <TerminalCardHeader>
-              <TerminalCardTitle><TrendingUp className="w-4 h-4"/> BTC 5M Price Action</TerminalCardTitle>
+              <TerminalCardTitle><TrendingUp className="w-4 h-4"/> BTC 15M Price Action</TerminalCardTitle>
             </TerminalCardHeader>
             <TerminalCardContent className="flex-1 min-h-[300px] p-2">
               {chartData.length > 0 ? (
