@@ -1,0 +1,25 @@
+(node:13804) Warning: SECURITY WARNING: The SSL modes 'prefer', 'require', and 'verify-ca' are treated as aliases for 'verify-full'.
+In the next major version (pg-connection-string v3.0.0 and pg v9.0.0), these modes will adopt standard libpq semantics, which have weaker security guarantees.
+
+To prepare for this change:
+- If you want the current behavior, explicitly use 'sslmode=verify-full'
+- If you want libpq compatibility now, use 'uselibpqcompat=true&sslmode=require'
+
+See https://www.postgresql.org/docs/current/libpq-ssl.html for libpq SSL mode definitions.
+(Use `node --trace-warnings ...` to show where the warning was created)
+Error: Failed query: select "id", "running", "mode", "balance", "starting_balance", "total_pnl", "total_trades", "winning_trades", "losing_trades", "current_position", "current_market_price", "last_signal", "kelly_fraction", "min_edge_threshold", "sizing_mode", "flat_size_usdc", "last_updated" from "bot_state" limit $1
+params: 1
+    at NodePgPreparedQuery.queryWithCache (C:\Users\HP\Downloads\Polymarket-Bot\Polymarket-Bot\node_modules\.pnpm\drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0\node_modules\src\pg-core\session.ts:73:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at <anonymous> (C:\Users\HP\Downloads\Polymarket-Bot\Polymarket-Bot\node_modules\.pnpm\drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0\node_modules\src\node-postgres\session.ts:154:19)
+    at ensureBotState (C:\Users\HP\Downloads\Polymarket-Bot\Polymarket-Bot\artifacts\api-server\src\lib\botEngine.ts:36:22)
+    at startBot (C:\Users\HP\Downloads\Polymarket-Bot\Polymarket-Bot\artifacts\api-server\src\lib\botEngine.ts:74:17)  
+    at <anonymous> (C:\Users\HP\Downloads\Polymarket-Bot\Polymarket-Bot\artifacts\api-server\src\routes\bot.ts:50:17)  
+Error: Failed query: select "id", "running", "mode", "balance", "starting_balance", "total_pnl", "total_trades", "winning_trades", "losing_trades", "current_position", "current_market_price", "last_signal", "kelly_fraction", "min_edge_threshold", "sizing_mode", "flat_size_usdc", "last_updated" from "bot_state" limit $1
+params: 1
+    at NodePgPreparedQuery.queryWithCache (C:\Users\HP\Downloads\Polymarket-Bot\Polymarket-Bot\node_modules\.pnpm\drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0\node_modules\src\pg-core\session.ts:73:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at <anonymous> (C:\Users\HP\Downloads\Polymarket-Bot\Polymarket-Bot\node_modules\.pnpm\drizzle-orm@0.45.1_@types+pg@8.18.0_pg@8.20.0\node_modules\src\node-postgres\session.ts:154:19)
+    at ensureBotState (C:\Users\HP\Downloads\Polymarket-Bot\Polymarket-Bot\artifacts\api-server\src\lib\botEngine.ts:36:22)
+    at startBot (C:\Users\HP\Downloads\Polymarket-Bot\Polymarket-Bot\artifacts\api-server\src\lib\botEngine.ts:74:17)  
+    at <anonymous> (C:\Users\HP\Downloads\Polymarket-Bot\Polymarket-Bot\artifacts\api-server\src\routes\bot.ts:50:17)  
