@@ -5,9 +5,10 @@
  * - Computes EV + Kelly sizing
  *
  * TEST mode: paper-trades against the live Polymarket feed.
- *   - Opens positions at real current price
- *   - Holds for 2 cycles (60s), then closes at real current price
- *   - P&L reflects actual price movement — no random simulation
+ *   - Opens positions at the real Polymarket market price (entry cost)
+ *   - Holds for 2 cycles (60s), then closes marked to MODEL probability
+ *   - Exit fair value = estimateTrueProb(currentBtcData) — driven by actual BTC movement
+ *   - This is "mark-to-model": P&L reflects BTC momentum, not illiquid Polymarket quotes
  *
  * LIVE mode: places real USDC orders on Polymarket CLOB via EIP-712 signing
  */
@@ -181,9 +182,9 @@ async function runBotCycle(botId: number) {
     const entryPrice = isBuyYes ? marketYesPrice : 1 - marketYesPrice;
     const winProb = isBuyYes ? trueProb : 1 - trueProb;
 
-    // ── Step 1: Close any open test positions using current live price ──
+    // ── Step 1: Close any open test positions using model fair value ──
     if (state.mode === "test") {
-      await closeMaturedTestPositions(botId, state, marketYesPrice);
+      await closeMaturedTestPositions(botId, state, marketYesPrice, trueProb);
     }
 
     // Re-read state after potential balance updates from closures
@@ -302,13 +303,24 @@ async function openTestPosition(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// TEST MODE — Close matured positions using current live Polymarket price
+// TEST MODE — Close matured positions, marked to model probability
 // ──────────────────────────────────────────────────────────────────────────────
+//
+// Why mark-to-model instead of Polymarket price?
+//   Polymarket BTC markets are ILLIQUID — the YES price barely moves between
+//   30-second cycles because no one is trading it. P&L based on that price is
+//   always ~$0. Instead, we exit at our model's estimated fair probability,
+//   which is driven by real BTC price momentum via Kraken. This gives realistic
+//   P&L: if BTC moves our way, we profit; if it moves against us, we lose.
+//
+//   Entry: real Polymarket market price (actual cost to open)
+//   Exit:  estimateTrueProb(currentBtcData) — our model's fair value
 
 async function closeMaturedTestPositions(
   botId: number,
   state: { id: number; balance: number; totalTrades: number; winningTrades: number; losingTrades: number; totalPnl: number },
   currentYesPrice: number,
+  currentTrueProb: number,
 ) {
   const openPositions = await db
     .select()
@@ -320,22 +332,26 @@ async function closeMaturedTestPositions(
 
   for (const pos of openPositions) {
     const age = now - pos.timestamp.getTime();
-    if (age < holdMs) continue; // Not ready to close yet
+    if (age < holdMs) continue;
 
-    // Entry and exit prices
-    const entryYesPrice = pos.marketPrice; // YES price at entry
+    // Entry price: what we actually paid per share on Polymarket
+    const entryYesPrice = pos.marketPrice;
     const entryPrice = pos.direction === "YES" ? entryYesPrice : 1 - entryYesPrice;
-    const exitPrice = pos.direction === "YES" ? currentYesPrice : 1 - currentYesPrice;
 
-    const pnl = pos.shares * (exitPrice - entryPrice);
+    // Exit fair value: model probability (driven by real BTC momentum).
+    // Polymarket price is illiquid and doesn't reflect short-term BTC moves.
+    const exitFairValue = pos.direction === "YES" ? currentTrueProb : 1 - currentTrueProb;
+
+    // P&L = shares × (exit fair value − entry cost per share)
+    const pnl = pos.shares * (exitFairValue - entryPrice);
     const won = pnl > 0;
 
+    // exitPrice stored in DB uses model fair value for display
     await db
       .update(tradesTable)
-      .set({ status: "closed", exitPrice, pnl, resolvedAt: new Date() })
+      .set({ status: "closed", exitPrice: exitFairValue, pnl, resolvedAt: new Date() })
       .where(eq(tradesTable.id, pos.id));
 
-    // Return capital + P&L
     const returnedCapital = pos.positionSize + pnl;
     await db
       .update(botStateTable)
@@ -349,25 +365,29 @@ async function closeMaturedTestPositions(
       })
       .where(eq(botStateTable.id, botId));
 
-    // Mutate state in-memory so subsequent positions see updated balance
     state.balance += returnedCapital;
     state.totalTrades += 1;
     state.totalPnl += pnl;
     if (won) state.winningTrades += 1; else state.losingTrades += 1;
 
-    const direction = pos.direction === "YES" ? currentYesPrice : 1 - currentYesPrice;
     console.log(
-      `[TEST] Closed ${pos.direction} @ ${(exitPrice * 100).toFixed(1)}¢ | ` +
-      `entry ${(entryPrice * 100).toFixed(1)}¢ | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`
+      `[TEST] Closed ${pos.direction} | entry ${(entryPrice * 100).toFixed(1)}¢ ` +
+      `→ model exit ${(exitFairValue * 100).toFixed(1)}¢ | ` +
+      `BTC trueProb ${(currentTrueProb * 100).toFixed(1)}% | ` +
+      `P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`
     );
   }
 }
 
 async function forceCloseOpenTestPositions(botId: number) {
   const state = await ensureBotState();
-  const polyData = await getBestBtcMarketPrice().catch(() => null);
+  const [polyData, btcData] = await Promise.all([
+    getBestBtcMarketPrice().catch(() => null),
+    getBtcPriceData().catch(() => null),
+  ]);
   const currentYesPrice = polyData?.yesPrice ?? 0.5;
-  await closeMaturedTestPositions(botId, state, currentYesPrice);
+  const currentTrueProb = btcData ? estimateTrueProb(btcData) : 0.5;
+  await closeMaturedTestPositions(botId, state, currentYesPrice, currentTrueProb);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

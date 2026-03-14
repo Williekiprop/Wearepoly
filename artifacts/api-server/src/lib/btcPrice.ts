@@ -1,6 +1,6 @@
 /**
  * BTC price data via Kraken public API (no geo-restriction).
- * Provides 5-minute OHLC candles and current price.
+ * Uses 1-minute OHLC candles + live ticker so the chart updates every poll.
  */
 
 export interface BtcCandle {
@@ -22,7 +22,7 @@ export interface BtcPriceData {
 }
 
 let cache: { data: BtcPriceData; fetchedAt: number } | null = null;
-const CACHE_TTL = 15_000;
+const CACHE_TTL = 10_000; // 10s — snappy updates in the dashboard
 
 export async function getBtcPriceData(): Promise<BtcPriceData> {
   if (cache && Date.now() - cache.fetchedAt < CACHE_TTL) {
@@ -30,12 +30,13 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
   }
 
   try {
-    // Fetch ticker and OHLC in parallel from Kraken
+    // Fetch ticker and 1-minute OHLC in parallel from Kraken
     const [tickerRes, ohlcRes] = await Promise.all([
       fetch("https://api.kraken.com/0/public/Ticker?pair=XBTUSD", {
         signal: AbortSignal.timeout(8000),
       }),
-      fetch("https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=5", {
+      // 1-minute candles — gives a dynamic chart that adds a new bar every minute
+      fetch("https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=1", {
         signal: AbortSignal.timeout(8000),
       }),
     ]);
@@ -49,8 +50,8 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
           XXBTZUSD: {
             c: [string, string]; // last trade price
             o: string;           // opening price (24h)
-            h: [string, string]; // high
-            l: [string, string]; // low
+            h: [string, string];
+            l: [string, string];
           };
         };
       }>,
@@ -68,15 +69,15 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
     }
 
     const ticker = tickerJson.result.XXBTZUSD;
+    const currentPrice = parseFloat(ticker.c[0]);
     const rawCandles = ohlcJson.result.XXBTZUSD ?? [];
 
-    // Last element is the in-progress candle — exclude it
-    const closedCandles = rawCandles.slice(0, -1);
+    // Take last 60 closed candles, then patch the in-progress one with the live price.
+    // The last element from Kraken is the in-progress (open) candle.
+    const closedCandles = rawCandles.slice(0, -1).slice(-59);
+    const inProgressRaw = rawCandles[rawCandles.length - 1];
 
-    // Take the last 50 candles for the chart
-    const last50 = closedCandles.slice(-50);
-
-    const candles: BtcCandle[] = last50.map(([time, open, high, low, close, , volume]) => ({
+    const candles: BtcCandle[] = closedCandles.map(([time, open, high, low, close, , volume]) => ({
       time: new Date(time * 1000).toISOString(),
       open: parseFloat(open),
       high: parseFloat(high),
@@ -85,25 +86,38 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
       volume: parseFloat(volume),
     }));
 
-    const currentPrice = parseFloat(ticker.c[0]);
-    const openPrice24h = parseFloat(ticker.o);
+    // Append the live in-progress candle with current price as close
+    if (inProgressRaw) {
+      const [time, open, high, low] = inProgressRaw;
+      const liveHigh = Math.max(parseFloat(high), currentPrice);
+      const liveLow = Math.min(parseFloat(low), currentPrice);
+      candles.push({
+        time: new Date(time * 1000).toISOString(),
+        open: parseFloat(open),
+        high: liveHigh,
+        low: liveLow,
+        close: currentPrice, // always reflects the very latest tick
+        volume: parseFloat(inProgressRaw[6]),
+      });
+    }
 
+    const openPrice24h = parseFloat(ticker.o);
     const change24h = openPrice24h > 0
       ? ((currentPrice - openPrice24h) / openPrice24h) * 100
       : 0;
 
-    // 5m change: compare current vs 1 candle back
-    const price5mAgo = candles.length >= 2
-      ? candles[candles.length - 2].close
+    // 5m change: compare current vs 5 candles back (5 × 1-min = 5 min)
+    const price5mAgo = candles.length >= 6
+      ? candles[candles.length - 6].close
       : currentPrice;
     const change5m = price5mAgo > 0
       ? ((currentPrice - price5mAgo) / price5mAgo) * 100
       : 0;
 
-    // 1h change: compare current vs 12 candles back (12 × 5min = 60min)
-    const price1hAgo = candles.length >= 12
-      ? candles[candles.length - 12].close
-      : currentPrice;
+    // 1h change: compare current vs 60 candles back (60 × 1-min)
+    const price1hAgo = candles.length >= 60
+      ? candles[candles.length - 60].close
+      : candles[0]?.close ?? currentPrice;
     const change1h = price1hAgo > 0
       ? ((currentPrice - price1hAgo) / price1hAgo) * 100
       : 0;
@@ -121,9 +135,7 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
     return data;
   } catch (err) {
     console.error("BTC price fetch error:", err);
-    // Return cached stale data if available
     if (cache) return cache.data;
-    // Hard fallback — no candles so chart shows nothing rather than wrong data
     return {
       currentPrice: 0,
       change5m: 0,
@@ -145,9 +157,7 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
 export function estimateTrueProb(btcData: BtcPriceData): number {
   const { change5m, change1h } = btcData;
   let prob = 0.5;
-  // 5m momentum dominates (short-term signal)
-  prob += change5m * 0.04;
-  // 1h trend provides secondary signal
-  prob += change1h * 0.015;
+  prob += change5m * 0.04;  // 5m momentum (primary signal)
+  prob += change1h * 0.015; // 1h trend (secondary signal)
   return Math.min(0.80, Math.max(0.20, prob));
 }
