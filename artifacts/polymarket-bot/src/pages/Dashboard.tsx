@@ -49,6 +49,9 @@ export default function Dashboard() {
   const [localApiSaved, setLocalApiSaved] = useState(() =>
     Boolean(localStorage.getItem("CUSTOM_API_URL"))
   );
+  const [chartVisible, setChartVisible] = useState(() =>
+    localStorage.getItem("CHART_VISIBLE") !== "false"
+  );
   const [proxyTestResult, setProxyTestResult] = useState<{
     proxyIp: string | null;
     proxyCountry: string | null;
@@ -761,13 +764,23 @@ export default function Dashboard() {
 
         {/* RIGHT COL: BTC Chart */}
         <div className="space-y-6">
-          <TerminalCard className="h-full flex flex-col">
+          <TerminalCard className="flex flex-col">
             <TerminalCardHeader>
               <TerminalCardTitle><TrendingUp className="w-4 h-4"/> BTC 15M Price Action</TerminalCardTitle>
+              <button
+                onClick={() => {
+                  const next = !chartVisible;
+                  setChartVisible(next);
+                  localStorage.setItem("CHART_VISIBLE", String(next));
+                }}
+                className="ml-auto text-[10px] font-mono text-muted-foreground hover:text-foreground border border-border/50 hover:border-border rounded px-2 py-0.5 transition-colors"
+              >
+                {chartVisible ? "HIDE" : "SHOW"}
+              </button>
             </TerminalCardHeader>
-            <TerminalCardContent className="flex-1 min-h-[300px] p-2">
+            <TerminalCardContent className={cn("p-2", !chartVisible && "hidden")}>
               {chartData.length > 0 ? (
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height={220}>
                   <ComposedChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
                     <XAxis 
@@ -805,7 +818,7 @@ export default function Dashboard() {
                   </ComposedChart>
                 </ResponsiveContainer>
               ) : (
-                <div className="h-full flex items-center justify-center text-muted-foreground text-sm font-mono">
+                <div className="h-[220px] flex items-center justify-center text-muted-foreground text-sm font-mono">
                   WAITING FOR DATA STREAM...
                 </div>
               )}
