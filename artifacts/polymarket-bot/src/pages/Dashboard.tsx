@@ -56,6 +56,9 @@ export default function Dashboard() {
     });
   };
 
+  const formatBtcPct = (val?: number | null) =>
+    val != null ? `${val >= 0 ? "+" : ""}${val.toFixed(3)}%` : "---";
+
   const handleStop = () => {
     mutations.stop.mutate();
   };
@@ -115,7 +118,7 @@ export default function Dashboard() {
               <span className={cn("text-xs font-mono font-medium", 
                 (btcData?.change5m || 0) >= 0 ? "text-success" : "text-destructive"
               )}>
-                {(btcData?.change5m || 0) >= 0 ? "+" : ""}{formatPct(btcData?.change5m)} (5m)
+                {formatBtcPct(btcData?.change5m)} (5m)
               </span>
             </div>
           </div>
@@ -209,7 +212,7 @@ export default function Dashboard() {
               <div className="grid grid-cols-2 gap-3">
                 <TerminalButton 
                   onClick={handleStart} 
-                  disabled={isRunning || mutations.start.isPending}
+                  disabled={mutations.start.isPending}
                   className="w-full relative overflow-hidden group"
                 >
                   <span className="relative z-10 flex items-center gap-2"><Power className="w-4 h-4"/> START BOT</span>
