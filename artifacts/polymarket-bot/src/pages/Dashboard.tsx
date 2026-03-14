@@ -46,6 +46,8 @@ export default function Dashboard() {
   const [proxyTestResult, setProxyTestResult] = useState<{
     proxyIp: string | null;
     proxyCountry: string | null;
+    proxyOrg: string | null;
+    isDatacenter: boolean;
     directIp: string | null;
     proxyConfigured: boolean;
     error?: string;
@@ -425,45 +427,69 @@ export default function Dashboard() {
                 {/* Test result */}
                 {proxyTestResult && (
                   <div className={cn(
-                    "rounded-lg px-3 py-2.5 font-mono text-[10px] space-y-1 border",
+                    "rounded-lg px-3 py-2.5 font-mono text-[10px] space-y-1.5 border",
                     proxyTestResult.error
-                      ? "bg-destructive/10 border-destructive/30 text-destructive"
-                      : proxyTestResult.proxyIp && proxyTestResult.proxyIp !== proxyTestResult.directIp
-                        ? "bg-green-500/10 border-green-500/30"
-                        : "bg-yellow-500/10 border-yellow-500/30"
+                      ? "bg-destructive/10 border-destructive/30"
+                      : proxyTestResult.isDatacenter
+                        ? "bg-yellow-500/10 border-yellow-500/30"
+                        : proxyTestResult.proxyIp !== proxyTestResult.directIp
+                          ? "bg-green-500/10 border-green-500/30"
+                          : "bg-yellow-500/10 border-yellow-500/30"
                   )}>
                     {proxyTestResult.error ? (
                       <>
                         <div className="font-bold text-destructive">⛔ Proxy connection failed</div>
                         <div className="text-destructive/80 break-all">{proxyTestResult.error}</div>
-                        <div className="text-muted-foreground">Check the URL format and that the proxy server is reachable.</div>
+                        <div className="text-muted-foreground">Check the URL format and that the proxy server is online.</div>
                       </>
                     ) : (
                       <>
-                        <div className={cn("font-bold", proxyTestResult.proxyIp !== proxyTestResult.directIp ? "text-green-400" : "text-yellow-400")}>
-                          {proxyTestResult.proxyIp !== proxyTestResult.directIp ? "✓ Proxy is routing traffic" : "⚠ Same IP — proxy may not be working"}
+                        <div className={cn("font-bold",
+                          proxyTestResult.proxyIp === proxyTestResult.directIp ? "text-yellow-400"
+                          : proxyTestResult.isDatacenter ? "text-yellow-400"
+                          : "text-green-400"
+                        )}>
+                          {proxyTestResult.proxyIp === proxyTestResult.directIp
+                            ? "⚠ Same IP — proxy not routing"
+                            : proxyTestResult.isDatacenter
+                              ? "⚠ Datacenter IP — Polymarket may block"
+                              : "✓ Residential IP — should bypass geoblock"}
                         </div>
                         <div className="flex justify-between gap-2">
-                          <span className="text-muted-foreground">Exit IP via proxy:</span>
+                          <span className="text-muted-foreground">Exit IP:</span>
                           <span className="text-foreground">{proxyTestResult.proxyIp ?? "unknown"}</span>
                         </div>
                         {proxyTestResult.proxyCountry && (
                           <div className="flex justify-between gap-2">
                             <span className="text-muted-foreground">Location:</span>
-                            <span className={cn(
-                              "font-bold",
+                            <span className={cn("font-bold",
                               proxyTestResult.proxyCountry.toLowerCase().includes("united states") ? "text-destructive" : "text-green-400"
                             )}>
                               {proxyTestResult.proxyCountry}
                             </span>
                           </div>
                         )}
+                        {proxyTestResult.proxyOrg && (
+                          <div className="flex justify-between gap-2">
+                            <span className="text-muted-foreground">ISP / Org:</span>
+                            <span className={cn("text-right break-all", proxyTestResult.isDatacenter ? "text-yellow-400" : "text-green-400")}>
+                              {proxyTestResult.proxyOrg}
+                            </span>
+                          </div>
+                        )}
                         <div className="flex justify-between gap-2">
-                          <span className="text-muted-foreground">Direct (Replit) IP:</span>
+                          <span className="text-muted-foreground">Replit IP:</span>
                           <span className="text-muted-foreground">{proxyTestResult.directIp ?? "unknown"}</span>
                         </div>
+                        {proxyTestResult.isDatacenter && (
+                          <div className="text-yellow-300/90 pt-0.5 border-t border-yellow-500/20 leading-relaxed">
+                            Datacenter/proxy IPs are on Polymarket's blocklist. You need a <span className="font-bold text-yellow-300">residential UK proxy</span> — try Bright Data or Smartproxy (UK residential plan).
+                          </div>
+                        )}
                         {proxyTestResult.proxyCountry?.toLowerCase().includes("united states") && (
-                          <div className="text-destructive mt-1">US exit IP — Polymarket will still block. Need a non-US proxy.</div>
+                          <div className="text-destructive pt-0.5 border-t border-destructive/20">
+                            US exit IP — still geoblocked. Switch to a UK/EU proxy.
+                          </div>
                         )}
                       </>
                     )}

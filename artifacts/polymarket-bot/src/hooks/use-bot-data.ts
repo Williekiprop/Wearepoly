@@ -87,6 +87,8 @@ export function useBotPolling() {
       return res.json() as Promise<{
         proxyIp: string | null;
         proxyCountry: string | null;
+        proxyOrg: string | null;
+        isDatacenter: boolean;
         directIp: string | null;
         proxyConfigured: boolean;
         error?: string;

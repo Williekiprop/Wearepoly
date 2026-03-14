@@ -116,18 +116,28 @@ export async function testProxy(): Promise<{
     const d = await r.json() as { ip: string };
     const proxyIp = d.ip;
 
-    // Geo lookup (free, no key needed)
+    // Geo + ISP lookup (free, no key needed)
     let proxyCountry: string | null = null;
+    let proxyOrg: string | null = null;
+    let isDatacenter = false;
     try {
       const geo = await fetch(`https://ipapi.co/${proxyIp}/json/`, { signal: AbortSignal.timeout(6000) });
-      const geoData = await geo.json() as { country_name?: string; city?: string };
+      const geoData = await geo.json() as {
+        country_name?: string; city?: string; org?: string;
+      };
       proxyCountry = geoData.city
         ? `${geoData.city}, ${geoData.country_name}`
         : (geoData.country_name ?? null);
+      proxyOrg = geoData.org ?? null;
+      // Heuristic: datacenter ISPs contain these keywords
+      const dcKeywords = ["hosting", "datacenter", "data center", "cloud", "vps", "server",
+        "webshare", "hetzner", "digitalocean", "linode", "vultr", "aws", "amazon",
+        "google", "microsoft", "azure", "ovh", "contabo", "leaseweb"];
+      isDatacenter = dcKeywords.some(k => proxyOrg?.toLowerCase().includes(k));
     } catch { /* geo lookup optional */ }
 
-    console.log(`[PROXY TEST] Exit IP: ${proxyIp} (${proxyCountry ?? "unknown"}) | Direct IP: ${directIp}`);
-    return { proxyIp, proxyCountry, directIp, proxyConfigured: true };
+    console.log(`[PROXY TEST] Exit IP: ${proxyIp} (${proxyCountry ?? "unknown"}, org: ${proxyOrg}) | Direct IP: ${directIp}`);
+    return { proxyIp, proxyCountry, proxyOrg, isDatacenter, directIp, proxyConfigured: true };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[PROXY TEST] Failed:", msg);
