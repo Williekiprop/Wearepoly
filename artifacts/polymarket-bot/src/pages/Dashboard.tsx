@@ -95,6 +95,8 @@ export default function Dashboard() {
   const formatPct = (val?: number | null) => 
     val != null ? `${(val * 100).toFixed(2)}%` : '---';
 
+  const isGeoblocked = (botData as any)?.lastSignal?.includes("BLOCKED");
+
   // Format data for chart
   const chartData = btcData?.candles.map(c => ({
     time: format(new Date(c.time), 'HH:mm'),
@@ -106,6 +108,22 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-background text-foreground p-4 md:p-6 lg:p-8 space-y-6 max-w-[1600px] mx-auto">
       
+      {/* GEOBLOCK BANNER — shown when Polymarket blocked the live order */}
+      {isGeoblocked && (
+        <div className="flex items-start gap-3 bg-destructive/10 border border-destructive/50 rounded-xl px-5 py-4 font-mono text-sm">
+          <span className="text-destructive text-lg mt-0.5">⛔</span>
+          <div className="flex flex-col gap-1">
+            <span className="text-destructive font-bold tracking-wide">LIVE ORDERS BLOCKED — Geographic Restriction</span>
+            <span className="text-destructive/80 text-xs leading-relaxed">
+              Polymarket bans all US-based server IPs from placing orders. Replit runs on US servers, so every live order fails at the network level — not a code issue.
+            </span>
+            <span className="text-muted-foreground text-xs mt-1 leading-relaxed">
+              <strong className="text-foreground">To use LIVE mode:</strong> run the API server locally on your own machine, or deploy it to a EU cloud server (e.g. Hetzner Germany, DigitalOcean Frankfurt). TEST mode works perfectly here.
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* HEADER */}
       <header className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 pb-4 border-b border-border/50">
         <div className="flex items-center gap-3">
@@ -244,12 +262,16 @@ export default function Dashboard() {
                       ⚡ LIVE
                     </button>
                   </div>
-                  <p className="text-[10px] font-mono mt-1.5 leading-relaxed">
-                    {mode === "test"
-                      ? <span className="text-warning">Paper trades on real Polymarket prices. P&amp;L reflects actual price movement.</span>
-                      : <span className="text-destructive">Real USDC placed on Polymarket CLOB. Requires non-blocked server.</span>
-                    }
-                  </p>
+                  {mode === "live" ? (
+                    <div className="mt-2 bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2 text-[10px] font-mono text-destructive/90 leading-relaxed space-y-1">
+                      <div className="font-bold">⛔ Replit servers are US-based</div>
+                      <div>Polymarket blocks all US IPs. Orders will fail here. Run the API server locally or on a EU VPS to use live mode.</div>
+                    </div>
+                  ) : (
+                    <p className="text-[10px] font-mono mt-1.5 text-warning leading-relaxed">
+                      Paper trades on real Polymarket prices. P&amp;L reflects actual BTC momentum.
+                    </p>
+                  )}
                 </div>
 
                 {/* Balance Input */}
