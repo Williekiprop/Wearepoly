@@ -1,6 +1,8 @@
 import { Router, type IRouter } from "express";
 import { getBotState, startBot, stopBot, resetBot, setSizingMode } from "../lib/botEngine.js";
-import { hasProxy, setProxyUrl, getProxyDisplay, testProxy } from "../lib/proxiedFetch.js";
+import { hasProxy, setProxyUrl, getProxyDisplay, testProxy, polyFetch } from "../lib/proxiedFetch.js";
+import { ethers } from "ethers";
+import * as crypto from "crypto";
 
 const router: IRouter = Router();
 
@@ -83,6 +85,54 @@ router.post("/bot/stop", async (_req, res): Promise<void> => {
 router.post("/bot/reset", async (_req, res): Promise<void> => {
   const state = await resetBot();
   res.json(formatState(state));
+});
+
+router.get("/bot/api-test", async (_req, res): Promise<void> => {
+  const key = process.env.POLYMARKET_API_KEY ?? "";
+  const secret = process.env.POLYMARKET_API_SECRET ?? "";
+  const passphrase = process.env.POLYMARKET_API_PASSPHRASE ?? "";
+  const pk = process.env.POLYMARKET_WALLET_KEY ?? "";
+
+  const walletAddress = pk
+    ? (() => { try { const k = pk.startsWith("0x") ? pk : `0x${pk}`; return new ethers.Wallet(k).address; } catch { return "INVALID_KEY"; } })()
+    : "NOT_SET";
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const path = `/balance-allowance?asset_type=USDC&signature_type=0`;
+  const message = `${timestamp}GET${path}`;
+  let secretBuffer: Buffer;
+  try { secretBuffer = Buffer.from(secret, "base64"); } catch { secretBuffer = Buffer.from(secret); }
+  const signature = crypto.createHmac("sha256", secretBuffer).update(message).digest("base64");
+
+  let polyResponse = "";
+  let polyStatus = 0;
+  try {
+    const r = await polyFetch(`https://clob.polymarket.com${path}`, {
+      headers: {
+        "POLY-API-KEY": key,
+        "POLY-PASSPHRASE": passphrase,
+        "POLY-TIMESTAMP": String(timestamp),
+        "POLY-SIGNATURE": signature,
+        "POLY-ADDRESS": walletAddress,
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+    polyStatus = r.status;
+    polyResponse = await r.text();
+  } catch (e) {
+    polyResponse = String(e);
+  }
+
+  res.json({
+    walletAddress,
+    keySet: !!key,
+    secretSet: !!secret,
+    passphraseSet: !!passphrase,
+    keyPreview: key ? `${key.slice(0, 8)}...` : "NOT_SET",
+    secretLength: secret.length,
+    polyStatus,
+    polyResponse,
+  });
 });
 
 export default router;
