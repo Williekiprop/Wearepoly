@@ -271,10 +271,37 @@ async function parseSuccessBody(
   }
 }
 
+/**
+ * If the user has set a custom local API server URL (stored in localStorage
+ * as CUSTOM_API_URL), rewrite relative API paths to point to that server.
+ * This lets the Replit dashboard talk to a locally-running API server that
+ * has unrestricted outbound access (e.g. via Proton VPN).
+ */
+function applyCustomBase(input: RequestInfo | URL): RequestInfo | URL {
+  let customBase: string | null = null;
+  try {
+    if (typeof localStorage !== "undefined") {
+      customBase = localStorage.getItem("CUSTOM_API_URL");
+    }
+  } catch { /* localStorage unavailable (SSR, etc.) */ }
+
+  if (!customBase) return input;
+
+  const url = resolveUrl(input as RequestInfo);
+  // Only rewrite relative paths — absolute URLs are left untouched
+  if (url.startsWith("http://") || url.startsWith("https://")) return input;
+
+  const base = customBase.replace(/\/+$/, "");
+  const path = url.startsWith("/") ? url : `/${url}`;
+  return `${base}${path}`;
+}
+
 export async function customFetch<T = unknown>(
   input: RequestInfo | URL,
   options: CustomFetchOptions = {},
 ): Promise<T> {
+  input = applyCustomBase(input);
+
   const { responseType = "auto", headers: headersInit, ...init } = options;
 
   const method = resolveMethod(input, init.method);

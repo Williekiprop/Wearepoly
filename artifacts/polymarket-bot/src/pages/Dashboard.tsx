@@ -43,6 +43,12 @@ export default function Dashboard() {
   const [sizingMode, setSizingModeLocal] = useState<"flat" | "kelly">("flat");
   const [proxyInput, setProxyInput] = useState("");
   const [proxyApplied, setProxyApplied] = useState(false);
+  const [localApiInput, setLocalApiInput] = useState(() =>
+    localStorage.getItem("CUSTOM_API_URL") ?? ""
+  );
+  const [localApiSaved, setLocalApiSaved] = useState(() =>
+    Boolean(localStorage.getItem("CUSTOM_API_URL"))
+  );
   const [proxyTestResult, setProxyTestResult] = useState<{
     proxyIp: string | null;
     proxyCountry: string | null;
@@ -96,6 +102,25 @@ export default function Dashboard() {
     mutations.proxyTest.mutate(undefined, {
       onSuccess: (data) => setProxyTestResult(data),
     });
+  };
+
+  const handleLocalApiSave = () => {
+    const url = localApiInput.trim().replace(/\/+$/, "");
+    if (url) {
+      localStorage.setItem("CUSTOM_API_URL", url);
+      setLocalApiSaved(true);
+    } else {
+      localStorage.removeItem("CUSTOM_API_URL");
+      setLocalApiSaved(false);
+    }
+    window.location.reload();
+  };
+
+  const handleLocalApiClear = () => {
+    localStorage.removeItem("CUSTOM_API_URL");
+    setLocalApiInput("");
+    setLocalApiSaved(false);
+    window.location.reload();
   };
 
   const handleSizingToggle = (newMode: "flat" | "kelly") => {
@@ -501,6 +526,62 @@ export default function Dashboard() {
                     ? "Click TEST to verify the exit IP is outside the US."
                     : "Paste your London/EU proxy URL. HTTP and SOCKS5 both work."}
                 </p>
+              </div>
+
+              {/* Local API Server Override */}
+              <div className="space-y-2">
+                <label className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider flex items-center gap-1.5">
+                  Local API Server
+                  {localApiSaved && (
+                    <span className="text-green-400 font-mono text-[9px] bg-green-500/15 border border-green-500/30 px-1.5 py-0.5 rounded">
+                      ACTIVE
+                    </span>
+                  )}
+                </label>
+
+                {localApiSaved && (
+                  <div className="text-[10px] font-mono text-green-400 bg-green-500/10 border border-green-500/25 rounded px-3 py-1.5 truncate">
+                    {localStorage.getItem("CUSTOM_API_URL")}
+                  </div>
+                )}
+
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    placeholder="https://xxxx.ngrok-free.app"
+                    value={localApiInput}
+                    onChange={(e) => { setLocalApiInput(e.target.value); setLocalApiSaved(false); }}
+                    className="flex-1 bg-input border border-border rounded-md h-9 px-3 font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary placeholder:text-muted-foreground/40"
+                  />
+                  <TerminalButton
+                    onClick={handleLocalApiSave}
+                    className="h-9 px-3 text-[11px] font-mono whitespace-nowrap"
+                  >
+                    {localApiSaved ? "✓ SAVED" : "SAVE"}
+                  </TerminalButton>
+                  {localApiSaved && (
+                    <TerminalButton
+                      onClick={handleLocalApiClear}
+                      variant="danger"
+                      className="h-9 px-3 text-[11px] font-mono"
+                    >
+                      CLEAR
+                    </TerminalButton>
+                  )}
+                </div>
+
+                <div className="bg-secondary/30 border border-border/50 rounded-lg px-3 py-2 space-y-1">
+                  <p className="text-[10px] font-mono text-yellow-400 font-bold">Bypass geoblock without any proxy</p>
+                  <p className="text-[10px] font-mono text-muted-foreground leading-relaxed">
+                    Run the API server on your own machine with Proton VPN, then expose it with:
+                  </p>
+                  <code className="block text-[10px] font-mono text-primary/90 bg-background/50 rounded px-2 py-1 mt-1">
+                    ngrok http 8080
+                  </code>
+                  <p className="text-[10px] font-mono text-muted-foreground leading-relaxed">
+                    Paste the <span className="text-foreground">https://xxxx.ngrok-free.app</span> URL above. All bot API calls will route through your VPN machine.
+                  </p>
+                </div>
               </div>
 
               {/* Sizing Toggle */}
