@@ -6,6 +6,9 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface HealthStatus {
-  status: string;
-}
+export type TradeMode = (typeof TradeMode)[keyof typeof TradeMode];
+
+export const TradeMode = {
+  test: "test",
+  live: "live",
+} as const;

@@ -1,0 +1,16 @@
+packages:
+  "recharts": "For rendering the BTC 5m candles mini-chart"
+  "framer-motion": "For smooth data transitions and signal animations"
+  "date-fns": "For formatting timestamps in the trade log"
+  "lucide-react": "For UI icons"
+  "clsx": "Utility for constructing className strings conditionally"
+  "tailwind-merge": "Utility for merging tailwind classes safely"
+
+images: []
+
+notes:
+  - Bot polls /api/bot/status every 3s
+  - Market analysis polls every 5s
+  - BTC price polls every 10s
+  - Uses TanStack query v5 refetchInterval for polling
+  - Expects Dark Mode as default

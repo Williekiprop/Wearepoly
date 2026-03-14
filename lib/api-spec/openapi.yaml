@@ -1,22 +1,26 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Polymarket BTC Trading Bot API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: bot
+    description: Bot control and status
+  - name: trades
+    description: Trade history
+  - name: market
+    description: Market data and analysis
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +28,115 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /bot/status:
+    get:
+      operationId: getBotStatus
+      tags: [bot]
+      summary: Get current bot status
+      responses:
+        "200":
+          description: Bot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/start:
+    post:
+      operationId: startBot
+      tags: [bot]
+      summary: Start the trading bot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartBotRequest"
+      responses:
+        "200":
+          description: Bot started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/stop:
+    post:
+      operationId: stopBot
+      tags: [bot]
+      summary: Stop the trading bot
+      responses:
+        "200":
+          description: Bot stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/reset:
+    post:
+      operationId: resetBot
+      tags: [bot]
+      summary: Reset bot and clear all trades
+      responses:
+        "200":
+          description: Bot reset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /trades:
+    get:
+      operationId: getTrades
+      tags: [trades]
+      summary: Get trade history
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: List of trades
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeListResponse"
+
+  /market/analysis:
+    get:
+      operationId: getMarketAnalysis
+      tags: [market]
+      summary: Get current market analysis and signals
+      responses:
+        "200":
+          description: Market analysis
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketAnalysis"
+
+  /market/btc-price:
+    get:
+      operationId: getBtcPrice
+      tags: [market]
+      summary: Get current BTC price and recent candles
+      responses:
+        "200":
+          description: BTC price data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BtcPriceData"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +147,242 @@ components:
       required:
         - status
 
+    BotStatus:
+      type: object
+      properties:
+        running:
+          type: boolean
+        mode:
+          type: string
+          enum: [test, live]
+        balance:
+          type: number
+        startingBalance:
+          type: number
+        totalPnl:
+          type: number
+        totalTrades:
+          type: integer
+        winningTrades:
+          type: integer
+        losingTrades:
+          type: integer
+        winRate:
+          type: number
+        currentPosition:
+          type: ["string", "null"]
+          enum: [YES, NO, null]
+        currentMarketPrice:
+          type: ["number", "null"]
+        lastSignal:
+          type: ["string", "null"]
+        lastUpdated:
+          type: string
+      required:
+        - running
+        - mode
+        - balance
+        - startingBalance
+        - totalPnl
+        - totalTrades
+        - winningTrades
+        - losingTrades
+        - winRate
+        - currentPosition
+        - currentMarketPrice
+        - lastSignal
+        - lastUpdated
+
+    StartBotRequest:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [test, live]
+        startingBalance:
+          type: number
+        kellyFraction:
+          type: number
+        minEdgeThreshold:
+          type: number
+      required:
+        - mode
+        - startingBalance
+
+    Trade:
+      type: object
+      properties:
+        id:
+          type: integer
+        timestamp:
+          type: string
+        direction:
+          type: string
+          enum: [YES, NO]
+        marketPrice:
+          type: number
+        estimatedProb:
+          type: number
+        edge:
+          type: number
+        kellyFraction:
+          type: number
+        positionSize:
+          type: number
+        shares:
+          type: number
+        priceImpact:
+          type: number
+        exitPrice:
+          type: ["number", "null"]
+        pnl:
+          type: ["number", "null"]
+        status:
+          type: string
+          enum: [open, closed, cancelled]
+        btcPriceAtEntry:
+          type: number
+        marketId:
+          type: string
+        resolvedAt:
+          type: ["string", "null"]
+        mode:
+          type: string
+          enum: [test, live]
+      required:
+        - id
+        - timestamp
+        - direction
+        - marketPrice
+        - estimatedProb
+        - edge
+        - kellyFraction
+        - positionSize
+        - shares
+        - priceImpact
+        - exitPrice
+        - pnl
+        - status
+        - btcPriceAtEntry
+        - marketId
+        - resolvedAt
+        - mode
+
+    TradeListResponse:
+      type: object
+      properties:
+        trades:
+          type: array
+          items:
+            $ref: "#/components/schemas/Trade"
+        total:
+          type: integer
+      required:
+        - trades
+        - total
+
+    MarketAnalysis:
+      type: object
+      properties:
+        marketId:
+          type: string
+        marketTitle:
+          type: string
+        currentPrice:
+          type: number
+        liquidityParam:
+          type: number
+        qYes:
+          type: number
+        qNo:
+          type: number
+        btcCurrentPrice:
+          type: number
+        btcPriceChange5m:
+          type: number
+        btcPriceChange1h:
+          type: number
+        estimatedTrueProb:
+          type: number
+        edge:
+          type: number
+        signal:
+          type: string
+          enum: [BUY_YES, BUY_NO, NO_TRADE]
+        evPerShare:
+          type: number
+        recommendedDirection:
+          type: ["string", "null"]
+          enum: [YES, NO, null]
+        kellySize:
+          type: number
+        priceImpact:
+          type: number
+        analysisTime:
+          type: string
+      required:
+        - marketId
+        - marketTitle
+        - currentPrice
+        - liquidityParam
+        - qYes
+        - qNo
+        - btcCurrentPrice
+        - btcPriceChange5m
+        - btcPriceChange1h
+        - estimatedTrueProb
+        - edge
+        - signal
+        - evPerShare
+        - recommendedDirection
+        - kellySize
+        - priceImpact
+        - analysisTime
+
+    BtcCandle:
+      type: object
+      properties:
+        time:
+          type: string
+        open:
+          type: number
+        high:
+          type: number
+        low:
+          type: number
+        close:
+          type: number
+        volume:
+          type: number
+      required:
+        - time
+        - open
+        - high
+        - low
+        - close
+        - volume
+
+    BtcPriceData:
+      type: object
+      properties:
+        currentPrice:
+          type: number
+        change5m:
+          type: number
+        change1h:
+          type: number
+        change24h:
+          type: number
+        candles:
+          type: array
+          items:
+            $ref: "#/components/schemas/BtcCandle"
+        fetchedAt:
+          type: string
+      required:
+        - currentPrice
+        - change5m
+        - change1h
+        - change24h
+        - candles
+        - fetchedAt

@@ -5,7 +5,9 @@
  * Polymarket BTC Trading Bot API
  * OpenAPI spec version: 0.1.0
  */
+import type { Trade } from "./trade";
 
-export interface HealthStatus {
-  status: string;
+export interface TradeListResponse {
+  trades: Trade[];
+  total: number;
 }
