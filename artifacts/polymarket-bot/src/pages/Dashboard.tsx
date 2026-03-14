@@ -43,6 +43,13 @@ export default function Dashboard() {
   const [sizingMode, setSizingModeLocal] = useState<"flat" | "kelly">("flat");
   const [proxyInput, setProxyInput] = useState("");
   const [proxyApplied, setProxyApplied] = useState(false);
+  const [proxyTestResult, setProxyTestResult] = useState<{
+    proxyIp: string | null;
+    proxyCountry: string | null;
+    directIp: string | null;
+    proxyConfigured: boolean;
+    error?: string;
+  } | null>(null);
 
   const botData = status.data;
   const marketData = analysis.data;
@@ -76,8 +83,16 @@ export default function Dashboard() {
     mutations.proxy.mutate(url, {
       onSuccess: () => {
         setProxyApplied(!!url);
+        setProxyTestResult(null);
         if (!url) setProxyInput("");
       }
+    });
+  };
+
+  const handleProxyTest = () => {
+    setProxyTestResult(null);
+    mutations.proxyTest.mutate(undefined, {
+      onSuccess: (data) => setProxyTestResult(data),
     });
   };
 
@@ -353,21 +368,25 @@ export default function Dashboard() {
               </div>
 
               {/* Proxy URL Input */}
-              <div>
-                <label className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block mb-2 flex items-center gap-1.5">
+              <div className="space-y-2">
+                <label className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider flex items-center gap-1.5">
                   EU Proxy URL
                   {proxyEnabled && <span className="text-green-400 font-mono text-[9px] bg-green-500/15 border border-green-500/30 px-1.5 py-0.5 rounded">ACTIVE</span>}
                 </label>
+
+                {/* Current proxy display when active and not re-entering */}
                 {proxyEnabled && (botData as any)?.proxyDisplay && !proxyApplied && (
-                  <div className="mb-2 text-[10px] font-mono text-green-400 bg-green-500/10 border border-green-500/25 rounded px-3 py-2 truncate">
+                  <div className="text-[10px] font-mono text-green-400 bg-green-500/10 border border-green-500/25 rounded px-3 py-1.5 truncate">
                     {(botData as any).proxyDisplay}
                   </div>
                 )}
-                <div className="flex gap-2">
+
+                {/* Input row */}
+                <div className="flex gap-1.5">
                   <input
                     type="text"
                     value={proxyInput}
-                    onChange={(e) => { setProxyInput(e.target.value); setProxyApplied(false); }}
+                    onChange={(e) => { setProxyInput(e.target.value); setProxyApplied(false); setProxyTestResult(null); }}
                     placeholder="http://user:pass@host:port"
                     className="flex-1 min-w-0 bg-input border border-border rounded-md h-9 px-3 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary placeholder:text-muted-foreground/40"
                   />
@@ -385,18 +404,76 @@ export default function Dashboard() {
                   </button>
                   {proxyEnabled && (
                     <button
-                      onClick={() => { setProxyInput(""); mutations.proxy.mutate(null, { onSuccess: () => setProxyApplied(false) }); }}
+                      onClick={() => { setProxyInput(""); setProxyTestResult(null); mutations.proxy.mutate(null, { onSuccess: () => setProxyApplied(false) }); }}
                       className="shrink-0 h-9 px-2 rounded-md text-xs font-mono text-destructive border border-destructive/30 hover:bg-destructive/10 transition-colors"
                       title="Clear proxy"
-                    >
-                      ✕
-                    </button>
+                    >✕</button>
                   )}
                 </div>
-                <p className="text-[10px] font-mono mt-1.5 text-muted-foreground leading-relaxed">
+
+                {/* Test Proxy button — only when proxy is active */}
+                {proxyEnabled && (
+                  <button
+                    onClick={handleProxyTest}
+                    disabled={mutations.proxyTest.isPending}
+                    className="w-full h-8 rounded-md text-[10px] font-bold font-mono tracking-wide border border-border/60 bg-secondary/40 text-muted-foreground hover:text-foreground hover:border-border transition-colors"
+                  >
+                    {mutations.proxyTest.isPending ? "TESTING EXIT IP…" : "TEST PROXY — CHECK EXIT IP"}
+                  </button>
+                )}
+
+                {/* Test result */}
+                {proxyTestResult && (
+                  <div className={cn(
+                    "rounded-lg px-3 py-2.5 font-mono text-[10px] space-y-1 border",
+                    proxyTestResult.error
+                      ? "bg-destructive/10 border-destructive/30 text-destructive"
+                      : proxyTestResult.proxyIp && proxyTestResult.proxyIp !== proxyTestResult.directIp
+                        ? "bg-green-500/10 border-green-500/30"
+                        : "bg-yellow-500/10 border-yellow-500/30"
+                  )}>
+                    {proxyTestResult.error ? (
+                      <>
+                        <div className="font-bold text-destructive">⛔ Proxy connection failed</div>
+                        <div className="text-destructive/80 break-all">{proxyTestResult.error}</div>
+                        <div className="text-muted-foreground">Check the URL format and that the proxy server is reachable.</div>
+                      </>
+                    ) : (
+                      <>
+                        <div className={cn("font-bold", proxyTestResult.proxyIp !== proxyTestResult.directIp ? "text-green-400" : "text-yellow-400")}>
+                          {proxyTestResult.proxyIp !== proxyTestResult.directIp ? "✓ Proxy is routing traffic" : "⚠ Same IP — proxy may not be working"}
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <span className="text-muted-foreground">Exit IP via proxy:</span>
+                          <span className="text-foreground">{proxyTestResult.proxyIp ?? "unknown"}</span>
+                        </div>
+                        {proxyTestResult.proxyCountry && (
+                          <div className="flex justify-between gap-2">
+                            <span className="text-muted-foreground">Location:</span>
+                            <span className={cn(
+                              "font-bold",
+                              proxyTestResult.proxyCountry.toLowerCase().includes("united states") ? "text-destructive" : "text-green-400"
+                            )}>
+                              {proxyTestResult.proxyCountry}
+                            </span>
+                          </div>
+                        )}
+                        <div className="flex justify-between gap-2">
+                          <span className="text-muted-foreground">Direct (Replit) IP:</span>
+                          <span className="text-muted-foreground">{proxyTestResult.directIp ?? "unknown"}</span>
+                        </div>
+                        {proxyTestResult.proxyCountry?.toLowerCase().includes("united states") && (
+                          <div className="text-destructive mt-1">US exit IP — Polymarket will still block. Need a non-US proxy.</div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+
+                <p className="text-[10px] font-mono text-muted-foreground leading-relaxed">
                   {proxyEnabled
-                    ? "Orders routing via EU proxy — geoblock bypassed. LIVE mode active."
-                    : "Paste your London/EU proxy to enable LIVE trading. SOCKS5 also works."}
+                    ? "Click TEST to verify the exit IP is outside the US."
+                    : "Paste your London/EU proxy URL. HTTP and SOCKS5 both work."}
                 </p>
               </div>
 

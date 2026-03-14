@@ -80,6 +80,20 @@ export function useBotPolling() {
     }
   });
 
+  const proxyTestMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`${API_BASE}/bot/proxy/test`);
+      if (!res.ok) throw new Error("Proxy test failed");
+      return res.json() as Promise<{
+        proxyIp: string | null;
+        proxyCountry: string | null;
+        directIp: string | null;
+        proxyConfigured: boolean;
+        error?: string;
+      }>;
+    },
+  });
+
   const proxyMutation = useMutation({
     mutationFn: async (proxyUrl: string | null) => {
       const res = await fetch(`${API_BASE}/bot/proxy`, {
@@ -121,6 +135,7 @@ export function useBotPolling() {
       reset: resetMutation,
       sizing: sizingMutation,
       proxy: proxyMutation,
+      proxyTest: proxyTestMutation,
     }
   };
 }

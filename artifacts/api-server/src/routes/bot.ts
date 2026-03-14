@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { getBotState, startBot, stopBot, resetBot, setSizingMode } from "../lib/botEngine.js";
-import { hasProxy, setProxyUrl, getProxyDisplay } from "../lib/proxiedFetch.js";
+import { hasProxy, setProxyUrl, getProxyDisplay, testProxy } from "../lib/proxiedFetch.js";
 
 const router: IRouter = Router();
 
@@ -68,6 +68,11 @@ router.patch("/bot/proxy", (req, res): void => {
   const { proxyUrl } = req.body as { proxyUrl?: string };
   setProxyUrl(proxyUrl ?? null);
   res.json({ ok: true, proxyEnabled: hasProxy(), proxyDisplay: getProxyDisplay() });
+});
+
+router.get("/bot/proxy/test", async (_req, res): Promise<void> => {
+  const result = await testProxy();
+  res.json(result);
 });
 
 router.post("/bot/stop", async (_req, res): Promise<void> => {

@@ -2,10 +2,8 @@
  * Proxy-aware fetch for Polymarket API calls.
  *
  * Proxy URL is read from PROXY_URL env var on startup, or set at runtime
- * via setProxyUrl() (e.g. from the dashboard UI). Runtime value takes
- * precedence over env var.
+ * via setProxyUrl(). Supports HTTP/HTTPS and SOCKS5 proxies via undici.
  *
- * Supports HTTP/HTTPS and SOCKS5 proxies via undici ProxyAgent.
  * Non-Polymarket calls (Kraken BTC prices) always use direct fetch.
  */
 
@@ -15,8 +13,14 @@ let _runtimeUrl: string | null = null;
 let _agent: ProxyAgent | null = null;
 let _proxyFetch: typeof fetch | null = null;
 
+/** Strip trailing slash — undici ProxyAgent misparses URLs like http://host:port/ */
+function cleanUrl(url: string): string {
+  return url.trim().replace(/\/+$/, "");
+}
+
 function getActiveUrl(): string | null {
-  return _runtimeUrl ?? process.env.PROXY_URL?.trim() ?? null;
+  const raw = _runtimeUrl ?? process.env.PROXY_URL ?? null;
+  return raw ? cleanUrl(raw) : null;
 }
 
 function buildProxyFetch(): typeof fetch {
@@ -24,8 +28,13 @@ function buildProxyFetch(): typeof fetch {
   if (!proxyUrl) return fetch;
 
   if (!_agent) {
-    _agent = new ProxyAgent(proxyUrl);
-    console.log(`[PROXY] Routing Polymarket requests via: ${maskUrl(proxyUrl)}`);
+    try {
+      _agent = new ProxyAgent(proxyUrl);
+      console.log(`[PROXY] Agent created via: ${maskUrl(proxyUrl)}`);
+    } catch (e) {
+      console.error("[PROXY] Failed to create ProxyAgent:", e);
+      return fetch;
+    }
   }
 
   if (!_proxyFetch) {
@@ -41,13 +50,13 @@ function buildProxyFetch(): typeof fetch {
 
 /** Set (or clear) the proxy URL at runtime — no server restart needed. */
 export function setProxyUrl(url: string | null): void {
-  _runtimeUrl = url?.trim() || null;
+  _runtimeUrl = url ? cleanUrl(url) : null;
   _agent = null;
   _proxyFetch = null;
   if (_runtimeUrl) {
-    console.log(`[PROXY] Updated proxy URL: ${maskUrl(_runtimeUrl)}`);
+    console.log(`[PROXY] Set to: ${maskUrl(_runtimeUrl)}`);
   } else {
-    console.log("[PROXY] Proxy cleared.");
+    console.log("[PROXY] Cleared.");
   }
 }
 
@@ -70,4 +79,58 @@ export function hasProxy(): boolean {
 /** Returns proxied fetch if proxy is configured, otherwise native fetch. */
 export function polyFetch(input: string | URL, init?: RequestInit): Promise<Response> {
   return buildProxyFetch()(input as string, init);
+}
+
+/**
+ * Test the proxy by asking ipify.org what IP it sees.
+ * Returns the observed exit IP and its geolocation country.
+ * Direct (no-proxy) IP is also returned for comparison.
+ */
+export async function testProxy(): Promise<{
+  proxyIp: string | null;
+  proxyCountry: string | null;
+  directIp: string | null;
+  proxyConfigured: boolean;
+  error?: string;
+}> {
+  const proxyConfigured = hasProxy();
+
+  // Always fetch direct IP
+  let directIp: string | null = null;
+  try {
+    const r = await fetch("https://api.ipify.org?format=json", { signal: AbortSignal.timeout(8000) });
+    const d = await r.json() as { ip: string };
+    directIp = d.ip;
+  } catch { /* ignore */ }
+
+  if (!proxyConfigured) {
+    return { proxyIp: null, proxyCountry: null, directIp, proxyConfigured: false };
+  }
+
+  try {
+    // Fetch through proxy
+    const proxyFetchFn = buildProxyFetch();
+    const r = await proxyFetchFn("https://api.ipify.org?format=json", {
+      signal: AbortSignal.timeout(10000),
+    } as RequestInit);
+    const d = await r.json() as { ip: string };
+    const proxyIp = d.ip;
+
+    // Geo lookup (free, no key needed)
+    let proxyCountry: string | null = null;
+    try {
+      const geo = await fetch(`https://ipapi.co/${proxyIp}/json/`, { signal: AbortSignal.timeout(6000) });
+      const geoData = await geo.json() as { country_name?: string; city?: string };
+      proxyCountry = geoData.city
+        ? `${geoData.city}, ${geoData.country_name}`
+        : (geoData.country_name ?? null);
+    } catch { /* geo lookup optional */ }
+
+    console.log(`[PROXY TEST] Exit IP: ${proxyIp} (${proxyCountry ?? "unknown"}) | Direct IP: ${directIp}`);
+    return { proxyIp, proxyCountry, directIp, proxyConfigured: true };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[PROXY TEST] Failed:", msg);
+    return { proxyIp: null, proxyCountry: null, directIp, proxyConfigured: true, error: msg };
+  }
 }
