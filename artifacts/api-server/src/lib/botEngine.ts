@@ -1,15 +1,15 @@
 /**
  * Bot Engine
  * Orchestrates polling, signal generation, and trade simulation.
+ * Uses real Polymarket prices in TEST mode — no real money spent.
  */
 
 import { db, botStateTable, tradesTable } from "@workspace/db";
-import { eq, desc } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { analyzeEdge } from "./lmsr.js";
 import { getBtcPriceData, estimateTrueProb } from "./btcPrice.js";
+import { getBestBtcMarketPrice, getConnectionStatus } from "./polymarketClient.js";
 
-const POLYMARKET_BTC_5M_MARKET_ID = "btc-5m-test-market";
-const POLYMARKET_BTC_5M_MARKET_TITLE = "Will BTC be higher in 5 minutes?";
 const B_PARAM = 100;
 
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
@@ -63,7 +63,7 @@ export async function startBot(opts: {
       losingTrades: 0,
       currentPosition: undefined,
       currentMarketPrice: undefined,
-      lastSignal: "Bot started",
+      lastSignal: "Bot started — connecting to Polymarket...",
       kellyFraction: opts.kellyFraction ?? 0.25,
       minEdgeThreshold: opts.minEdgeThreshold ?? 0.03,
       lastUpdated: new Date(),
@@ -113,6 +113,7 @@ export async function resetBot() {
 
 function startPolling(botId: number) {
   stopPolling();
+  // Every 30s: run one cycle
   pollingInterval = setInterval(() => runBotCycle(botId), 30_000);
   runBotCycle(botId);
 }
@@ -129,13 +130,23 @@ async function runBotCycle(botId: number) {
     const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
     if (!state || !state.running) return;
 
+    // Fetch BTC price data for momentum signal
     const btcData = await getBtcPriceData();
+
+    // Try to get the real Polymarket market price
+    // Falls back to 0.5 (neutral) if unavailable
+    const polyData = await getBestBtcMarketPrice();
+
+    // Our estimated true probability uses BTC momentum
     const trueProb = estimateTrueProb(btcData);
 
-    const qYes = 0;
-    const qNo = 0;
-    const q: [number, number] = [qYes, qNo];
+    // Use real Polymarket price as market price if available, else use LMSR neutral 0.5
+    const marketYesPrice = polyData.connected ? polyData.yesPrice : 0.5;
+    const marketId = polyData.market?.conditionId ?? "btc-sim-market";
+    const marketTitle = polyData.market?.question ?? "Will BTC be higher? (simulated)";
 
+    // Compute edge and Kelly sizing against the real market price
+    const q: [number, number] = [0, 0];
     const analysis = analyzeEdge(
       q,
       B_PARAM,
@@ -145,21 +156,36 @@ async function runBotCycle(botId: number) {
       state.minEdgeThreshold
     );
 
+    // Override market price with real Polymarket price
+    const edge = trueProb - marketYesPrice;
+    const evPerShare = trueProb * (1 - marketYesPrice) - (1 - trueProb) * marketYesPrice;
+
     await db
       .update(botStateTable)
       .set({
-        currentMarketPrice: analysis.marketPrice,
-        lastSignal: analysis.signal,
+        currentMarketPrice: marketYesPrice,
+        lastSignal: Math.abs(edge) < state.minEdgeThreshold
+          ? "NO_TRADE"
+          : edge > 0 ? "BUY_YES" : "BUY_NO",
         lastUpdated: new Date(),
       })
       .where(eq(botStateTable.id, botId));
 
-    if (analysis.signal === "NO_TRADE" || analysis.positionSize <= 0 || state.balance < 0.5) {
+    if (Math.abs(edge) < state.minEdgeThreshold || state.balance < 0.5) {
       return;
     }
 
     if (state.mode === "test") {
-      await simulateTrade(botId, state, analysis, btcData.currentPrice, q);
+      await simulateTrade(botId, state, {
+        direction: edge > 0 ? "YES" : "NO",
+        marketPrice: marketYesPrice,
+        edge,
+        evPerShare,
+        kellyScaledPct: analysis.kellyScaledPct,
+        positionSize: Math.min(analysis.positionSize, state.balance),
+        shares: analysis.shares,
+        priceImpact: analysis.priceImpact,
+      }, btcData.currentPrice, marketId);
     }
   } catch (err) {
     console.error("Bot cycle error:", err);
@@ -168,45 +194,56 @@ async function runBotCycle(botId: number) {
 
 async function simulateTrade(
   botId: number,
-  state: { id: number; balance: number; totalTrades: number; winningTrades: number; losingTrades: number; totalPnl: number; kellyFraction: number; minEdgeThreshold: number },
-  analysis: ReturnType<typeof analyzeEdge>,
+  state: {
+    id: number;
+    balance: number;
+    totalTrades: number;
+    winningTrades: number;
+    losingTrades: number;
+    totalPnl: number;
+  },
+  trade: {
+    direction: "YES" | "NO";
+    marketPrice: number;
+    edge: number;
+    evPerShare: number;
+    kellyScaledPct: number;
+    positionSize: number;
+    shares: number;
+    priceImpact: number;
+  },
   btcPrice: number,
-  _q: [number, number]
+  marketId: string,
 ) {
-  const positionSize = Math.min(analysis.positionSize, state.balance);
-  if (positionSize <= 0) return;
+  const { direction, marketPrice, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
+  if (positionSize <= 0 || shares <= 0) return;
 
-  const trueProb = analysis.direction === "YES" ? analysis.marketPrice + analysis.edge : analysis.marketPrice - analysis.edge;
-  const winProb = analysis.direction === "YES" ? trueProb : 1 - trueProb;
+  // Simulate outcome using our estimated probability
+  const trueProb = direction === "YES" ? marketPrice + edge : marketPrice - edge;
+  const winProb = direction === "YES" ? trueProb : 1 - trueProb;
   const won = Math.random() < winProb;
 
   const exitPrice = won
-    ? (analysis.direction === "YES" ? 1.0 : 0.0)
-    : (analysis.direction === "YES" ? 0.0 : 1.0);
+    ? (direction === "YES" ? 1.0 : 0.0)
+    : (direction === "YES" ? 0.0 : 1.0);
 
-  const entryPrice = analysis.direction === "YES" ? analysis.marketPrice : 1 - analysis.marketPrice;
-  const pnl = analysis.shares * (exitPrice - entryPrice);
-
-  const newBalance = state.balance + pnl;
-  const newTotalTrades = state.totalTrades + 1;
-  const newWinning = won ? state.winningTrades + 1 : state.winningTrades;
-  const newLosing = won ? state.losingTrades : state.losingTrades + 1;
-  const newTotalPnl = state.totalPnl + pnl;
+  const entryPrice = direction === "YES" ? marketPrice : 1 - marketPrice;
+  const pnl = shares * (exitPrice - entryPrice);
 
   await db.insert(tradesTable).values({
-    direction: analysis.direction!,
-    marketPrice: analysis.marketPrice,
+    direction,
+    marketPrice,
     estimatedProb: trueProb,
-    edge: analysis.edge,
-    kellyFraction: analysis.kellyScaledPct,
+    edge,
+    kellyFraction: kellyScaledPct,
     positionSize,
-    shares: analysis.shares,
-    priceImpact: analysis.priceImpact,
+    shares,
+    priceImpact,
     exitPrice,
     pnl,
     status: "closed",
     btcPriceAtEntry: btcPrice,
-    marketId: POLYMARKET_BTC_5M_MARKET_ID,
+    marketId,
     mode: "test",
     resolvedAt: new Date(),
   });
@@ -214,11 +251,11 @@ async function simulateTrade(
   await db
     .update(botStateTable)
     .set({
-      balance: newBalance,
-      totalTrades: newTotalTrades,
-      winningTrades: newWinning,
-      losingTrades: newLosing,
-      totalPnl: newTotalPnl,
+      balance: state.balance + pnl,
+      totalTrades: state.totalTrades + 1,
+      winningTrades: won ? state.winningTrades + 1 : state.winningTrades,
+      losingTrades: won ? state.losingTrades : state.losingTrades + 1,
+      totalPnl: state.totalPnl + pnl,
       lastUpdated: new Date(),
     })
     .where(eq(botStateTable.id, botId));
@@ -226,8 +263,14 @@ async function simulateTrade(
 
 export async function getMarketAnalysis() {
   const state = await ensureBotState();
-  const btcData = await getBtcPriceData();
+
+  const [btcData, polyData] = await Promise.all([
+    getBtcPriceData(),
+    getBestBtcMarketPrice(),
+  ]);
+
   const trueProb = estimateTrueProb(btcData);
+  const marketYesPrice = polyData.connected ? polyData.yesPrice : 0.5;
 
   const q: [number, number] = [0, 0];
   const analysis = analyzeEdge(
@@ -239,10 +282,16 @@ export async function getMarketAnalysis() {
     state.minEdgeThreshold
   );
 
+  const edge = trueProb - marketYesPrice;
+  const evPerShare = trueProb * (1 - marketYesPrice) - (1 - trueProb) * marketYesPrice;
+  const signal = Math.abs(edge) < state.minEdgeThreshold
+    ? "NO_TRADE"
+    : edge > 0 ? "BUY_YES" : "BUY_NO";
+
   return {
-    marketId: POLYMARKET_BTC_5M_MARKET_ID,
-    marketTitle: POLYMARKET_BTC_5M_MARKET_TITLE,
-    currentPrice: analysis.marketPrice,
+    marketId: polyData.market?.conditionId ?? "btc-sim-market",
+    marketTitle: polyData.market?.question ?? "Will BTC be higher? (simulated)",
+    currentPrice: marketYesPrice,
     liquidityParam: B_PARAM,
     qYes: q[0],
     qNo: q[1],
@@ -250,12 +299,14 @@ export async function getMarketAnalysis() {
     btcPriceChange5m: btcData.change5m,
     btcPriceChange1h: btcData.change1h,
     estimatedTrueProb: trueProb,
-    edge: analysis.edge,
-    signal: analysis.signal,
-    evPerShare: analysis.evPerShare,
-    recommendedDirection: analysis.direction,
+    edge,
+    signal: signal as "BUY_YES" | "BUY_NO" | "NO_TRADE",
+    evPerShare,
+    recommendedDirection: edge > 0 ? "YES" : edge < 0 ? "NO" : null,
     kellySize: analysis.positionSize,
     priceImpact: analysis.priceImpact,
     analysisTime: new Date().toISOString(),
   };
 }
+
+export { getConnectionStatus };
