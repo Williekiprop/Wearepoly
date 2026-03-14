@@ -10,6 +10,7 @@
 
 import { ethers } from "ethers";
 import * as crypto from "crypto";
+import { polyFetch, hasProxy } from "./proxiedFetch.js";
 
 const CLOB_API = "https://clob.polymarket.com";
 const CHAIN_ID = 137; // Polygon mainnet
@@ -158,7 +159,7 @@ export async function getClobTokenId(
   try {
     const path = `/markets/${conditionId}`;
     const headers = buildApiHeaders("GET", path);
-    const res = await fetch(`${CLOB_API}${path}`, {
+    const res = await polyFetch(`${CLOB_API}${path}`, {
       headers,
       signal: AbortSignal.timeout(8000),
     });
@@ -198,7 +199,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<OrderResult>
     const path = "/order";
     const headers = buildApiHeaders("POST", path, body);
 
-    const res = await fetch(`${CLOB_API}${path}`, {
+    const res = await polyFetch(`${CLOB_API}${path}`, {
       method: "POST",
       headers,
       body,
@@ -241,7 +242,7 @@ export async function cancelOrder(orderId: string): Promise<boolean> {
     const path = "/order";
     const headers = buildApiHeaders("DELETE", path, body);
 
-    const res = await fetch(`${CLOB_API}${path}`, {
+    const res = await polyFetch(`${CLOB_API}${path}`, {
       method: "DELETE",
       headers,
       body,
@@ -262,7 +263,7 @@ export async function getWalletBalance(): Promise<number | null> {
     const wallet = getWallet();
     const path = `/balance-allowance?asset_type=USDC&signature_type=0`;
     const headers = buildApiHeaders("GET", path);
-    const res = await fetch(`${CLOB_API}${path}`, {
+    const res = await polyFetch(`${CLOB_API}${path}`, {
       headers: { ...headers, "POLY-ADDRESS": wallet.address },
       signal: AbortSignal.timeout(8000),
     });

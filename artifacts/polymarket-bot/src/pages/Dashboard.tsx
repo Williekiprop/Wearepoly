@@ -96,6 +96,7 @@ export default function Dashboard() {
     val != null ? `${(val * 100).toFixed(2)}%` : '---';
 
   const isGeoblocked = (botData as any)?.lastSignal?.includes("BLOCKED");
+  const proxyEnabled = (botData as any)?.proxyEnabled === true;
 
   // Format data for chart
   const chartData = btcData?.candles.map(c => ({
@@ -109,17 +110,55 @@ export default function Dashboard() {
     <div className="min-h-screen bg-background text-foreground p-4 md:p-6 lg:p-8 space-y-6 max-w-[1600px] mx-auto">
       
       {/* GEOBLOCK BANNER — shown when Polymarket blocked the live order */}
-      {isGeoblocked && (
-        <div className="flex items-start gap-3 bg-destructive/10 border border-destructive/50 rounded-xl px-5 py-4 font-mono text-sm">
-          <span className="text-destructive text-lg mt-0.5">⛔</span>
-          <div className="flex flex-col gap-1">
+      {isGeoblocked && !proxyEnabled && (
+        <div className="bg-destructive/10 border border-destructive/40 rounded-xl px-5 py-4 font-mono text-sm space-y-3">
+          <div className="flex items-center gap-2">
+            <span className="text-destructive text-base">⛔</span>
             <span className="text-destructive font-bold tracking-wide">LIVE ORDERS BLOCKED — Geographic Restriction</span>
-            <span className="text-destructive/80 text-xs leading-relaxed">
-              Polymarket bans all US-based server IPs from placing orders. Replit runs on US servers, so every live order fails at the network level — not a code issue.
-            </span>
-            <span className="text-muted-foreground text-xs mt-1 leading-relaxed">
-              <strong className="text-foreground">To use LIVE mode:</strong> run the API server locally on your own machine, or deploy it to a EU cloud server (e.g. Hetzner Germany, DigitalOcean Frankfurt). TEST mode works perfectly here.
-            </span>
+          </div>
+          <p className="text-destructive/80 text-xs leading-relaxed">
+            Polymarket bans all US-based server IPs. Replit runs on US servers, so every live order fails at the network layer — not a code issue.
+          </p>
+
+          <div className="border-t border-destructive/20 pt-3 space-y-2">
+            <p className="text-foreground text-xs font-bold uppercase tracking-wider">Fix: Route orders through a non-US proxy</p>
+
+            <div className="space-y-1 text-xs text-muted-foreground leading-relaxed">
+              <p><span className="text-yellow-400 font-bold">Step 1 —</span> Get a EU proxy (HTTP/HTTPS or SOCKS5):</p>
+              <p className="pl-3">• <span className="text-foreground">webshare.io</span> — free tier has EU proxies, upgrade for dedicated IPs</p>
+              <p className="pl-3">• <span className="text-foreground">brightdata.com</span> — residential EU IPs (best geoblock bypass)</p>
+              <p className="pl-3">• <span className="text-foreground">Your own VPS</span> — any EU server running Squid or Dante</p>
+            </div>
+
+            <div className="space-y-1 text-xs leading-relaxed">
+              <p className="text-yellow-400 font-bold">Step 2 — Add the PROXY_URL secret to Replit:</p>
+              <p className="pl-3 text-muted-foreground">In the Secrets panel (lock icon in sidebar), add:</p>
+              <div className="bg-black/40 border border-border/50 rounded px-3 py-2 mt-1">
+                <span className="text-green-400">Key:</span> <span className="text-foreground">PROXY_URL</span>
+                <br />
+                <span className="text-green-400">Value:</span> <span className="text-foreground">http://user:password@proxy-host:port</span>
+              </div>
+              <p className="pl-3 text-muted-foreground mt-1">SOCKS5 format: <span className="text-foreground">socks5://user:password@proxy-host:port</span></p>
+            </div>
+
+            <p className="text-xs text-muted-foreground">
+              <span className="text-yellow-400 font-bold">Step 3 —</span> Restart the API server workflow. The proxy indicator in the header will turn <span className="text-green-400">green</span>.
+            </p>
+          </div>
+
+          <p className="text-muted-foreground text-xs border-t border-destructive/20 pt-2">
+            TEST mode works perfectly without a proxy — full paper trading with real Polymarket prices.
+          </p>
+        </div>
+      )}
+
+      {/* PROXY ACTIVE CONFIRMATION */}
+      {proxyEnabled && (
+        <div className="flex items-center gap-3 bg-green-500/10 border border-green-500/30 rounded-xl px-5 py-3 font-mono text-sm">
+          <span className="text-green-400 text-base">🛡</span>
+          <div className="flex flex-col gap-0.5">
+            <span className="text-green-400 font-bold tracking-wide">PROXY ACTIVE — Geoblock Bypassed</span>
+            <span className="text-muted-foreground text-xs">All Polymarket requests are routing through your configured proxy. LIVE mode orders should reach the CLOB API.</span>
           </div>
         </div>
       )}
@@ -140,8 +179,11 @@ export default function Dashboard() {
                 <span className={cn("relative inline-flex rounded-full h-2 w-2", isRunning ? "bg-primary" : "bg-muted-foreground")}></span>
               </span>
               <span className="text-xs font-mono text-muted-foreground">
-                {isRunning ? "SYSTEM_ACTIVE" : "SYSTEM_STANDBY"} • v1.0.4
+                {isRunning ? "SYSTEM_ACTIVE" : "SYSTEM_STANDBY"} • v1.0.5
               </span>
+              {proxyEnabled && (
+                <span className="text-[10px] font-mono bg-green-500/15 text-green-400 border border-green-500/30 rounded px-1.5 py-0.5 tracking-wide">PROXY ON</span>
+              )}
             </div>
           </div>
         </div>

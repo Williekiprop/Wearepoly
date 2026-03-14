@@ -1,5 +1,6 @@
 import { Router, type IRouter } from "express";
 import { getBotState, startBot, stopBot, resetBot, setSizingMode } from "../lib/botEngine.js";
+import { hasProxy } from "../lib/proxiedFetch.js";
 
 const router: IRouter = Router();
 
@@ -20,6 +21,7 @@ function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
     lastSignal: state.lastSignal ?? null,
     sizingMode: state.sizingMode,
     flatSizeUsdc: state.flatSizeUsdc,
+    proxyEnabled: hasProxy(),
     lastUpdated: state.lastUpdated.toISOString(),
   };
 }

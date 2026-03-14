@@ -7,6 +7,8 @@
  * LIVE MODE: would place real orders (requires additional implementation).
  */
 
+import { polyFetch } from "./proxiedFetch.js";
+
 export interface PolymarketMarket {
   conditionId: string;
   question: string;
@@ -42,7 +44,7 @@ export async function fetchBtcEvents(): Promise<PolymarketEvent[]> {
   }
 
   try {
-    const res = await fetch(
+    const res = await polyFetch(
       `${GAMMA_API}/events?active=true&limit=200&order=volume&ascending=false`,
       { signal: AbortSignal.timeout(8000) }
     );
@@ -171,7 +173,7 @@ export async function getOrderBook(tokenId: string): Promise<{
   midPrice: number;
 } | null> {
   try {
-    const res = await fetch(`${CLOB_API}/book?token_id=${tokenId}`, {
+    const res = await polyFetch(`${CLOB_API}/book?token_id=${tokenId}`, {
       headers: buildAuthHeaders(),
       signal: AbortSignal.timeout(5000),
     });

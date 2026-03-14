@@ -16,7 +16,8 @@
     "drizzle-orm": "catalog:",
     "ethers": "^6.16.0",
     "express": "^5",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "undici": "^7.24.1"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.10",
