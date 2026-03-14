@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useBotPolling } from "@/hooks/use-bot-data";
 import { 
   TerminalCard, 
@@ -39,7 +39,7 @@ import { motion, AnimatePresence } from "framer-motion";
 export default function Dashboard() {
   const { status, analysis, btc, trades, mutations } = useBotPolling();
   const [startBalanceInput, setStartBalanceInput] = useState("4");
-  const [mode, setMode] = useState<"test" | "live">("live");
+  const [mode, setMode] = useState<"test" | "live">("test");
 
   const botData = status.data;
   const marketData = analysis.data;
@@ -47,6 +47,11 @@ export default function Dashboard() {
   const tradesData = trades.data;
 
   const isRunning = botData?.running || false;
+
+  // Keep toggle in sync with the actual running mode
+  useEffect(() => {
+    if (botData?.mode) setMode(botData.mode as "test" | "live");
+  }, [botData?.mode]);
 
   const handleStart = () => {
     mutations.start.mutate({
@@ -193,10 +198,52 @@ export default function Dashboard() {
             </TerminalCardHeader>
             <TerminalCardContent className="space-y-6 p-6">
               
-              <div className="flex flex-col gap-2">
-                <label className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">Configuration</label>
-                <div className="flex items-center gap-3">
-                  <div className="relative flex-1">
+              <div className="flex flex-col gap-3">
+                {/* Mode Toggle */}
+                <div>
+                  <label className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block mb-2">Trading Mode</label>
+                  <div className={cn(
+                    "relative flex rounded-lg p-1 gap-1 transition-colors",
+                    isRunning ? "opacity-50 pointer-events-none" : "",
+                    "bg-secondary/40 border border-border/50"
+                  )}>
+                    <button
+                      onClick={() => setMode("test")}
+                      className={cn(
+                        "flex-1 py-2 px-3 rounded-md text-xs font-bold font-mono tracking-wide transition-all duration-200",
+                        mode === "test"
+                          ? "bg-warning/20 text-warning border border-warning/40 shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      📊 TEST
+                    </button>
+                    <button
+                      onClick={() => setMode("live")}
+                      className={cn(
+                        "flex-1 py-2 px-3 rounded-md text-xs font-bold font-mono tracking-wide transition-all duration-200",
+                        mode === "live"
+                          ? "bg-destructive/20 text-destructive border border-destructive/40 shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      ⚡ LIVE
+                    </button>
+                  </div>
+                  <p className="text-[10px] font-mono mt-1.5 leading-relaxed">
+                    {mode === "test"
+                      ? <span className="text-warning">Paper trades on real Polymarket prices. P&amp;L reflects actual price movement.</span>
+                      : <span className="text-destructive">Real USDC placed on Polymarket CLOB. Requires non-blocked server.</span>
+                    }
+                  </p>
+                </div>
+
+                {/* Balance Input */}
+                <div>
+                  <label className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block mb-2">
+                    {mode === "live" ? "Starting Balance (USDC)" : "Paper Balance ($)"}
+                  </label>
+                  <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground font-mono">$</span>
                     <input 
                       type="number" 
@@ -206,24 +253,7 @@ export default function Dashboard() {
                       className="w-full bg-input border border-border rounded-md h-10 pl-7 pr-3 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
                     />
                   </div>
-                  <button
-                    disabled={isRunning}
-                    onClick={() => setMode(m => m === "test" ? "live" : "test")}
-                    className={cn(
-                      "h-10 px-3 text-xs font-bold font-mono rounded-md border transition-colors disabled:opacity-50",
-                      mode === "live"
-                        ? "bg-destructive/20 border-destructive text-destructive"
-                        : "bg-warning/20 border-warning text-warning"
-                    )}
-                  >
-                    {mode === "live" ? "⚡ LIVE" : "TEST"}
-                  </button>
                 </div>
-                {mode === "live" && !isRunning && (
-                  <p className="text-[10px] text-destructive font-mono">
-                    LIVE MODE: Real USDC will be placed on Polymarket
-                  </p>
-                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -472,7 +502,9 @@ export default function Dashboard() {
                       trade.pnl && trade.pnl < 0 ? "text-destructive" : 
                       "text-muted-foreground"
                     )}>
-                      {trade.status === 'open' ? '---' : formatCurrency(trade.pnl)}
+                      {trade.status === 'open'
+                        ? <span className="text-warning font-mono text-xs animate-pulse">HOLDING...</span>
+                        : formatCurrency(trade.pnl)}
                     </td>
                   </tr>
                 ))

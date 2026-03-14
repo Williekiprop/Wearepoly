@@ -1,25 +1,35 @@
 /**
  * Bot Engine
  * - Reads real BTC prices from Kraken
- * - Reads real contract prices from Polymarket
- * - Computes EV + Kelly sizing against the real market price
- * - TEST mode: simulates trade outcomes probabilistically — no real money
- * - LIVE mode: places real orders via Polymarket CLOB API with EIP-712 signing
+ * - Reads real Polymarket contract prices
+ * - Computes EV + Kelly sizing
+ *
+ * TEST mode: paper-trades against the live Polymarket feed.
+ *   - Opens positions at real current price
+ *   - Holds for 2 cycles (60s), then closes at real current price
+ *   - P&L reflects actual price movement — no random simulation
+ *
+ * LIVE mode: places real USDC orders on Polymarket CLOB via EIP-712 signing
  */
 
 import { db, botStateTable, tradesTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { calcKelly, simulatePriceImpact } from "./lmsr.js";
 import { getBtcPriceData, estimateTrueProb } from "./btcPrice.js";
 import { getBestBtcMarketPrice, getConnectionStatus } from "./polymarketClient.js";
 import { placeOrder, getClobTokenId, getWalletBalance } from "./polymarketOrder.js";
 
 const B_PARAM = 100;
-
-// Minimum $0.50 USDC per live order (Polymarket minimum)
 const MIN_LIVE_ORDER_USDC = 0.50;
 
+// How many 30s cycles to hold a test position before closing at market price
+const TEST_HOLD_CYCLES = 2; // 60 seconds
+
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// STATE MANAGEMENT
+// ──────────────────────────────────────────────────────────────────────────────
 
 async function ensureBotState() {
   const [existing] = await db.select().from(botStateTable).limit(1);
@@ -57,10 +67,8 @@ export async function startBot(opts: {
 }) {
   stopPolling();
   const state = await ensureBotState();
-
   await db.delete(tradesTable);
 
-  // For live mode, fetch real balance from Polymarket wallet
   let initialBalance = opts.startingBalance;
   if (opts.mode === "live") {
     const walletBalance = await getWalletBalance();
@@ -68,7 +76,7 @@ export async function startBot(opts: {
       initialBalance = walletBalance;
       console.log(`[LIVE] Wallet balance: $${walletBalance.toFixed(2)} USDC`);
     } else {
-      console.warn("[LIVE] Could not fetch wallet balance, using provided starting balance");
+      console.warn("[LIVE] Could not fetch wallet balance, using provided balance");
     }
   }
 
@@ -85,7 +93,7 @@ export async function startBot(opts: {
       losingTrades: 0,
       currentPosition: undefined,
       currentMarketPrice: undefined,
-      lastSignal: opts.mode === "live" ? "LIVE MODE — Connecting..." : "Connecting to Polymarket...",
+      lastSignal: opts.mode === "live" ? "LIVE MODE — Connecting..." : "Paper trading on live feed...",
       kellyFraction: opts.kellyFraction ?? 0.25,
       minEdgeThreshold: opts.minEdgeThreshold ?? 0.03,
       lastUpdated: new Date(),
@@ -99,19 +107,18 @@ export async function startBot(opts: {
 export async function stopBot() {
   stopPolling();
   const state = await ensureBotState();
-
+  // Close any open test positions at last known price
+  await forceCloseOpenTestPositions(state.id);
   await db
     .update(botStateTable)
     .set({ running: false, lastSignal: "Bot stopped", lastUpdated: new Date() })
     .where(eq(botStateTable.id, state.id));
-
   return getBotState();
 }
 
 export async function resetBot() {
   stopPolling();
   const state = await ensureBotState();
-
   await db
     .update(botStateTable)
     .set({
@@ -128,7 +135,6 @@ export async function resetBot() {
       lastUpdated: new Date(),
     })
     .where(eq(botStateTable.id, state.id));
-
   await db.delete(tradesTable);
   return getBotState();
 }
@@ -146,27 +152,27 @@ function stopPolling() {
   }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// MAIN CYCLE
+// ──────────────────────────────────────────────────────────────────────────────
+
 async function runBotCycle(botId: number) {
   try {
     const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
     if (!state || !state.running) return;
 
-    // 1. Real BTC price from Kraken
-    const btcData = await getBtcPriceData();
+    // Fetch live data in parallel
+    const [btcData, polyData] = await Promise.all([
+      getBtcPriceData(),
+      getBestBtcMarketPrice(),
+    ]);
 
-    // 2. Real Polymarket contract price (YES token)
-    const polyData = await getBestBtcMarketPrice();
     const marketYesPrice =
       polyData.connected && polyData.yesPrice > 0.01 && polyData.yesPrice < 0.99
         ? polyData.yesPrice
         : 0.5;
-
     const marketId = polyData.market?.conditionId ?? "btc-sim-market";
-
-    // 3. Momentum-based true probability estimate
     const trueProb = estimateTrueProb(btcData);
-
-    // 4. Edge = our estimate vs market price
     const edge = trueProb - marketYesPrice;
     const evPerShare = trueProb * (1 - marketYesPrice) - (1 - trueProb) * marketYesPrice;
 
@@ -175,67 +181,193 @@ async function runBotCycle(botId: number) {
     const entryPrice = isBuyYes ? marketYesPrice : 1 - marketYesPrice;
     const winProb = isBuyYes ? trueProb : 1 - trueProb;
 
+    // ── Step 1: Close any open test positions using current live price ──
+    if (state.mode === "test") {
+      await closeMaturedTestPositions(botId, state, marketYesPrice);
+    }
+
+    // Re-read state after potential balance updates from closures
+    const [freshState] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+    if (!freshState?.running) return;
+
+    // ── Step 2: Compute signal & sizing ──
     let signal: "BUY_YES" | "BUY_NO" | "NO_TRADE" = "NO_TRADE";
     let positionSize = 0;
     let shares = 0;
     let priceImpact = 0;
 
-    if (Math.abs(edge) >= state.minEdgeThreshold && state.balance >= 0.5) {
+    if (Math.abs(edge) >= freshState.minEdgeThreshold && freshState.balance >= 0.5) {
       signal = isBuyYes ? "BUY_YES" : "BUY_NO";
-
       const kellyFull = calcKelly(winProb, entryPrice);
-      const kellyScaled = kellyFull * state.kellyFraction;
-      positionSize = Math.min(state.balance * kellyScaled, state.balance);
+      const kellyScaled = kellyFull * freshState.kellyFraction;
+      positionSize = Math.min(freshState.balance * kellyScaled, freshState.balance);
       shares = entryPrice > 0 ? positionSize / entryPrice : 0;
-
       const outcome = isBuyYes ? 0 : 1;
       const { impact } = simulatePriceImpact([0, 0], B_PARAM, outcome, shares);
       priceImpact = impact;
-
       if (priceImpact > Math.abs(edge) * 0.5) {
         positionSize *= 0.5;
         shares *= 0.5;
       }
     }
 
-    // Update bot status
     await db
       .update(botStateTable)
-      .set({
-        currentMarketPrice: marketYesPrice,
-        lastSignal: signal,
-        lastUpdated: new Date(),
-      })
+      .set({ currentMarketPrice: marketYesPrice, lastSignal: signal, lastUpdated: new Date() })
       .where(eq(botStateTable.id, botId));
 
     if (signal === "NO_TRADE" || positionSize < 0.01 || shares <= 0) return;
 
-    if (state.mode === "live") {
-      await executeLiveTrade(botId, state, {
+    // ── Step 3: Only open one position at a time (test mode) ──
+    if (freshState.mode === "test") {
+      const openPositions = await db
+        .select()
+        .from(tradesTable)
+        .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
+
+      if (openPositions.length > 0) {
+        // Already holding a position — wait for it to close
+        return;
+      }
+
+      await openTestPosition(botId, freshState, {
         direction,
         marketPrice: marketYesPrice,
         edge,
         evPerShare,
-        kellyScaledPct: positionSize / state.balance,
-        positionSize,
-        shares,
-        priceImpact,
-      }, btcData.currentPrice, marketId, polyData.market?.conditionId ?? null);
-    } else {
-      await simulateTrade(botId, state, {
-        direction,
-        marketPrice: marketYesPrice,
-        edge,
-        evPerShare,
-        kellyScaledPct: positionSize / state.balance,
+        kellyScaledPct: positionSize / freshState.balance,
         positionSize,
         shares,
         priceImpact,
       }, btcData.currentPrice, marketId);
+    } else {
+      await executeLiveTrade(botId, freshState, {
+        direction,
+        marketPrice: marketYesPrice,
+        edge,
+        evPerShare,
+        kellyScaledPct: positionSize / freshState.balance,
+        positionSize,
+        shares,
+        priceImpact,
+      }, btcData.currentPrice, marketId, polyData.market?.conditionId ?? null);
     }
   } catch (err) {
     console.error("Bot cycle error:", err);
   }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// TEST MODE — Open position (paper trade at real price)
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function openTestPosition(
+  botId: number,
+  state: { id: number; balance: number; totalTrades: number; winningTrades: number; losingTrades: number; totalPnl: number },
+  trade: { direction: "YES" | "NO"; marketPrice: number; edge: number; evPerShare: number; kellyScaledPct: number; positionSize: number; shares: number; priceImpact: number },
+  btcPrice: number,
+  marketId: string,
+) {
+  const { direction, marketPrice, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
+  const trueYesProb = Math.min(0.95, Math.max(0.05, marketPrice + edge));
+
+  await db.insert(tradesTable).values({
+    direction,
+    marketPrice,
+    estimatedProb: trueYesProb,
+    edge,
+    kellyFraction: kellyScaledPct,
+    positionSize,
+    shares,
+    priceImpact,
+    exitPrice: null,
+    pnl: null,
+    status: "open",
+    btcPriceAtEntry: btcPrice,
+    marketId,
+    mode: "test",
+    resolvedAt: null,
+  });
+
+  // Reserve capital while position is open
+  await db
+    .update(botStateTable)
+    .set({
+      balance: state.balance - positionSize,
+      lastUpdated: new Date(),
+    })
+    .where(eq(botStateTable.id, botId));
+
+  console.log(`[TEST] Opened ${direction} position: $${positionSize.toFixed(3)} @ ${(marketPrice * 100).toFixed(1)}¢ YES price`);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// TEST MODE — Close matured positions using current live Polymarket price
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function closeMaturedTestPositions(
+  botId: number,
+  state: { id: number; balance: number; totalTrades: number; winningTrades: number; losingTrades: number; totalPnl: number },
+  currentYesPrice: number,
+) {
+  const openPositions = await db
+    .select()
+    .from(tradesTable)
+    .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
+
+  const now = Date.now();
+  const holdMs = TEST_HOLD_CYCLES * 30_000;
+
+  for (const pos of openPositions) {
+    const age = now - pos.timestamp.getTime();
+    if (age < holdMs) continue; // Not ready to close yet
+
+    // Entry and exit prices
+    const entryYesPrice = pos.marketPrice; // YES price at entry
+    const entryPrice = pos.direction === "YES" ? entryYesPrice : 1 - entryYesPrice;
+    const exitPrice = pos.direction === "YES" ? currentYesPrice : 1 - currentYesPrice;
+
+    const pnl = pos.shares * (exitPrice - entryPrice);
+    const won = pnl > 0;
+
+    await db
+      .update(tradesTable)
+      .set({ status: "closed", exitPrice, pnl, resolvedAt: new Date() })
+      .where(eq(tradesTable.id, pos.id));
+
+    // Return capital + P&L
+    const returnedCapital = pos.positionSize + pnl;
+    await db
+      .update(botStateTable)
+      .set({
+        balance: state.balance + returnedCapital,
+        totalTrades: state.totalTrades + 1,
+        winningTrades: won ? state.winningTrades + 1 : state.winningTrades,
+        losingTrades: won ? state.losingTrades : state.losingTrades + 1,
+        totalPnl: state.totalPnl + pnl,
+        lastUpdated: new Date(),
+      })
+      .where(eq(botStateTable.id, botId));
+
+    // Mutate state in-memory so subsequent positions see updated balance
+    state.balance += returnedCapital;
+    state.totalTrades += 1;
+    state.totalPnl += pnl;
+    if (won) state.winningTrades += 1; else state.losingTrades += 1;
+
+    const direction = pos.direction === "YES" ? currentYesPrice : 1 - currentYesPrice;
+    console.log(
+      `[TEST] Closed ${pos.direction} @ ${(exitPrice * 100).toFixed(1)}¢ | ` +
+      `entry ${(entryPrice * 100).toFixed(1)}¢ | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`
+    );
+  }
+}
+
+async function forceCloseOpenTestPositions(botId: number) {
+  const state = await ensureBotState();
+  const polyData = await getBestBtcMarketPrice().catch(() => null);
+  const currentYesPrice = polyData?.yesPrice ?? 0.5;
+  await closeMaturedTestPositions(botId, state, currentYesPrice);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -244,85 +376,45 @@ async function runBotCycle(botId: number) {
 
 async function executeLiveTrade(
   botId: number,
-  state: {
-    id: number;
-    balance: number;
-    totalTrades: number;
-    winningTrades: number;
-    losingTrades: number;
-    totalPnl: number;
-  },
-  trade: {
-    direction: "YES" | "NO";
-    marketPrice: number;
-    edge: number;
-    evPerShare: number;
-    kellyScaledPct: number;
-    positionSize: number;
-    shares: number;
-    priceImpact: number;
-  },
+  state: { id: number; balance: number; totalTrades: number; winningTrades: number; losingTrades: number; totalPnl: number },
+  trade: { direction: "YES" | "NO"; marketPrice: number; edge: number; evPerShare: number; kellyScaledPct: number; positionSize: number; shares: number; priceImpact: number },
   btcPrice: number,
   marketId: string,
   conditionId: string | null,
 ) {
   const { direction, marketPrice, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
 
-  // Enforce minimum order size
   const orderSize = Math.max(positionSize, MIN_LIVE_ORDER_USDC);
   if (orderSize > state.balance) {
     console.log(`[LIVE] Skipping — order size $${orderSize.toFixed(2)} > balance $${state.balance.toFixed(2)}`);
     return;
   }
 
-  // Get the CLOB token ID for this direction
   let tokenId: string | null = null;
-  if (conditionId) {
-    tokenId = await getClobTokenId(conditionId, direction);
-  }
+  if (conditionId) tokenId = await getClobTokenId(conditionId, direction);
 
   if (!tokenId) {
     console.error(`[LIVE] Could not get CLOB token ID for ${direction} on ${conditionId}`);
-    // Fall back to simulated trade so we don't lose the signal
-    await simulateTrade(botId, state, trade, btcPrice, marketId);
     return;
   }
 
   const limitPrice = direction === "YES" ? marketPrice : 1 - marketPrice;
+  console.log(`[LIVE] Placing ${direction} order: $${orderSize.toFixed(2)} @ ${(limitPrice * 100).toFixed(1)}¢`);
 
-  console.log(`[LIVE] Placing ${direction} order: $${orderSize.toFixed(2)} USDC @ ${(limitPrice * 100).toFixed(1)}¢ on ${marketId}`);
-
-  const result = await placeOrder({
-    tokenId,
-    side: "BUY",
-    price: limitPrice,
-    sizeUsdc: orderSize,
-  });
-
+  const result = await placeOrder({ tokenId, side: "BUY", price: limitPrice, sizeUsdc: orderSize });
   const trueYesProb = Math.min(0.95, Math.max(0.05, marketPrice + edge));
-  const trueProb = trueYesProb;
 
   if (result.success) {
-    // Record as "open" — will close when market resolves
     await db.insert(tradesTable).values({
-      direction,
-      marketPrice,
-      estimatedProb: trueProb,
-      edge,
-      kellyFraction: kellyScaledPct,
-      positionSize: orderSize,
-      shares,
-      priceImpact,
-      exitPrice: null,
-      pnl: null,
-      status: "open",
+      direction, marketPrice,
+      estimatedProb: trueYesProb,
+      edge, kellyFraction: kellyScaledPct,
+      positionSize: orderSize, shares, priceImpact,
+      exitPrice: null, pnl: null, status: "open",
       btcPriceAtEntry: btcPrice,
       marketId: result.orderId ? `${marketId}::${result.orderId}` : marketId,
-      resolvedAt: null,
-      mode: "live",
+      resolvedAt: null, mode: "live",
     });
-
-    // Deduct from balance immediately (USDC spent)
     await db
       .update(botStateTable)
       .set({
@@ -332,131 +424,46 @@ async function executeLiveTrade(
         lastUpdated: new Date(),
       })
       .where(eq(botStateTable.id, botId));
-
     console.log(`[LIVE] Order placed OK: ${result.orderId}`);
   } else {
     const errorMsg = result.errorMessage ?? "";
     console.error(`[LIVE] Order failed: ${errorMsg}`);
-
-    const isGeoblock =
-      errorMsg.includes("restricted") ||
-      errorMsg.includes("geoblock") ||
-      errorMsg.includes("region");
-
+    const isGeoblock = errorMsg.includes("restricted") || errorMsg.includes("geoblock") || errorMsg.includes("region");
     if (isGeoblock) {
-      // Stop immediately — no point retrying a geo-blocked server
-      console.error("[LIVE] Geoblock detected — stopping bot. Run locally or on an EU server.");
+      console.error("[LIVE] Geoblock — stopping bot.");
       stopPolling();
       await db
         .update(botStateTable)
         .set({
           running: false,
-          lastSignal: "BLOCKED: Polymarket restricts orders from Replit servers. Run the bot locally or on a non-US VPS to go live.",
+          lastSignal: "BLOCKED: Polymarket restricts orders from Replit servers. Run locally or on a EU server.",
           lastUpdated: new Date(),
         })
         .where(eq(botStateTable.id, botId));
     } else {
       await db
         .update(botStateTable)
-        .set({
-          lastSignal: `ORDER FAILED: ${errorMsg.substring(0, 60)}`,
-          lastUpdated: new Date(),
-        })
+        .set({ lastSignal: `ORDER FAILED: ${errorMsg.substring(0, 60)}`, lastUpdated: new Date() })
         .where(eq(botStateTable.id, botId));
     }
   }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// SIMULATED TRADE (test mode)
-// ──────────────────────────────────────────────────────────────────────────────
-
-async function simulateTrade(
-  botId: number,
-  state: {
-    id: number;
-    balance: number;
-    totalTrades: number;
-    winningTrades: number;
-    losingTrades: number;
-    totalPnl: number;
-  },
-  trade: {
-    direction: "YES" | "NO";
-    marketPrice: number;
-    edge: number;
-    evPerShare: number;
-    kellyScaledPct: number;
-    positionSize: number;
-    shares: number;
-    priceImpact: number;
-  },
-  btcPrice: number,
-  marketId: string,
-) {
-  const { direction, marketPrice, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
-
-  const trueYesProb = Math.min(0.95, Math.max(0.05, marketPrice + edge));
-  const winProb = direction === "YES" ? trueYesProb : 1 - trueYesProb;
-  const trueProb = trueYesProb;
-
-  const won = Math.random() < winProb;
-  const exitPrice = won ? 1.0 : 0.0;
-  const entryPrice = direction === "YES" ? marketPrice : 1 - marketPrice;
-  const pnl = shares * (exitPrice - entryPrice);
-
-  await db.insert(tradesTable).values({
-    direction,
-    marketPrice,
-    estimatedProb: trueProb,
-    edge,
-    kellyFraction: kellyScaledPct,
-    positionSize,
-    shares,
-    priceImpact,
-    exitPrice,
-    pnl,
-    status: "closed",
-    btcPriceAtEntry: btcPrice,
-    marketId,
-    mode: "test",
-    resolvedAt: new Date(),
-  });
-
-  await db
-    .update(botStateTable)
-    .set({
-      balance: state.balance + pnl,
-      totalTrades: state.totalTrades + 1,
-      winningTrades: won ? state.winningTrades + 1 : state.winningTrades,
-      losingTrades: won ? state.losingTrades : state.losingTrades + 1,
-      totalPnl: state.totalPnl + pnl,
-      lastUpdated: new Date(),
-    })
-    .where(eq(botStateTable.id, botId));
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// MARKET ANALYSIS (for dashboard)
+// MARKET ANALYSIS (dashboard)
 // ──────────────────────────────────────────────────────────────────────────────
 
 export async function getMarketAnalysis() {
   const state = await ensureBotState();
-
-  const [btcData, polyData] = await Promise.all([
-    getBtcPriceData(),
-    getBestBtcMarketPrice(),
-  ]);
+  const [btcData, polyData] = await Promise.all([getBtcPriceData(), getBestBtcMarketPrice()]);
 
   const trueProb = estimateTrueProb(btcData);
   const marketYesPrice =
     polyData.connected && polyData.yesPrice > 0.01 && polyData.yesPrice < 0.99
-      ? polyData.yesPrice
-      : 0.5;
+      ? polyData.yesPrice : 0.5;
 
   const edge = trueProb - marketYesPrice;
   const evPerShare = trueProb * (1 - marketYesPrice) - (1 - trueProb) * marketYesPrice;
-
   const isBuyYes = edge > 0;
   const entryPrice = isBuyYes ? marketYesPrice : 1 - marketYesPrice;
   const winProb = isBuyYes ? trueProb : 1 - trueProb;
@@ -471,8 +478,7 @@ export async function getMarketAnalysis() {
     const kellyScaled = kellyFull * state.kellyFraction;
     positionSize = Math.min(state.balance * kellyScaled, state.balance);
     const shares = entryPrice > 0 ? positionSize / entryPrice : 0;
-    const outcome = isBuyYes ? 0 : 1;
-    const { impact } = simulatePriceImpact([0, 0], B_PARAM, outcome, shares);
+    const { impact } = simulatePriceImpact([0, 0], B_PARAM, isBuyYes ? 0 : 1, shares);
     priceImpact = impact;
   }
 
@@ -481,15 +487,12 @@ export async function getMarketAnalysis() {
     marketTitle: polyData.market?.question ?? "Bitcoin Price Market (simulated)",
     currentPrice: marketYesPrice,
     liquidityParam: B_PARAM,
-    qYes: 0,
-    qNo: 0,
+    qYes: 0, qNo: 0,
     btcCurrentPrice: btcData.currentPrice,
     btcPriceChange5m: btcData.change5m,
     btcPriceChange1h: btcData.change1h,
     estimatedTrueProb: trueProb,
-    edge,
-    signal,
-    evPerShare,
+    edge, signal, evPerShare,
     recommendedDirection: (edge > 0 ? "YES" : edge < 0 ? "NO" : null) as "YES" | "NO" | null,
     kellySize: positionSize,
     priceImpact,
