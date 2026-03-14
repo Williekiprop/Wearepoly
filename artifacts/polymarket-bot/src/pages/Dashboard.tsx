@@ -38,7 +38,8 @@ import { motion, AnimatePresence } from "framer-motion";
 
 export default function Dashboard() {
   const { status, analysis, btc, trades, mutations } = useBotPolling();
-  const [startBalanceInput, setStartBalanceInput] = useState("20");
+  const [startBalanceInput, setStartBalanceInput] = useState("4");
+  const [mode, setMode] = useState<"test" | "live">("live");
 
   const botData = status.data;
   const marketData = analysis.data;
@@ -50,8 +51,8 @@ export default function Dashboard() {
   const handleStart = () => {
     mutations.start.mutate({
       data: {
-        mode: "test",
-        startingBalance: parseFloat(startBalanceInput) || 20,
+        mode,
+        startingBalance: parseFloat(startBalanceInput) || 4,
       }
     });
   };
@@ -205,8 +206,24 @@ export default function Dashboard() {
                       className="w-full bg-input border border-border rounded-md h-10 pl-7 pr-3 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
                     />
                   </div>
-                  <TerminalBadge variant="warning" className="h-10 px-4 text-xs">TEST MODE</TerminalBadge>
+                  <button
+                    disabled={isRunning}
+                    onClick={() => setMode(m => m === "test" ? "live" : "test")}
+                    className={cn(
+                      "h-10 px-3 text-xs font-bold font-mono rounded-md border transition-colors disabled:opacity-50",
+                      mode === "live"
+                        ? "bg-destructive/20 border-destructive text-destructive"
+                        : "bg-warning/20 border-warning text-warning"
+                    )}
+                  >
+                    {mode === "live" ? "⚡ LIVE" : "TEST"}
+                  </button>
                 </div>
+                {mode === "live" && !isRunning && (
+                  <p className="text-[10px] text-destructive font-mono">
+                    LIVE MODE: Real USDC will be placed on Polymarket
+                  </p>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -438,10 +455,13 @@ export default function Dashboard() {
                         {trade.direction}
                       </TerminalBadge>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3 flex gap-1 items-center">
                       <TerminalBadge variant={trade.status === 'open' ? 'warning' : 'default'} className="bg-transparent">
                         {trade.status}
                       </TerminalBadge>
+                      {(trade as { mode?: string }).mode === 'live' && (
+                        <TerminalBadge variant="danger" className="text-[9px] px-1">LIVE</TerminalBadge>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right">{formatCurrency(trade.marketPrice)}</td>
                     <td className="px-4 py-3 text-right text-success">{formatPct(trade.edge)}</td>
