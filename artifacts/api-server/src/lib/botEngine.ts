@@ -335,15 +335,35 @@ async function executeLiveTrade(
 
     console.log(`[LIVE] Order placed OK: ${result.orderId}`);
   } else {
-    console.error(`[LIVE] Order failed: ${result.errorMessage}`);
+    const errorMsg = result.errorMessage ?? "";
+    console.error(`[LIVE] Order failed: ${errorMsg}`);
 
-    await db
-      .update(botStateTable)
-      .set({
-        lastSignal: `ORDER FAILED: ${result.errorMessage?.substring(0, 60)}`,
-        lastUpdated: new Date(),
-      })
-      .where(eq(botStateTable.id, botId));
+    const isGeoblock =
+      errorMsg.includes("restricted") ||
+      errorMsg.includes("geoblock") ||
+      errorMsg.includes("region");
+
+    if (isGeoblock) {
+      // Stop immediately — no point retrying a geo-blocked server
+      console.error("[LIVE] Geoblock detected — stopping bot. Run locally or on an EU server.");
+      stopPolling();
+      await db
+        .update(botStateTable)
+        .set({
+          running: false,
+          lastSignal: "BLOCKED: Polymarket restricts orders from Replit servers. Run the bot locally or on a non-US VPS to go live.",
+          lastUpdated: new Date(),
+        })
+        .where(eq(botStateTable.id, botId));
+    } else {
+      await db
+        .update(botStateTable)
+        .set({
+          lastSignal: `ORDER FAILED: ${errorMsg.substring(0, 60)}`,
+          lastUpdated: new Date(),
+        })
+        .where(eq(botStateTable.id, botId));
+    }
   }
 }
 
