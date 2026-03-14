@@ -156,7 +156,7 @@ export default function Dashboard() {
   const proxyEnabled = (botData as any)?.proxyEnabled === true;
 
   // Format data for chart — last 15 candles (15-min window)
-  const chartData = (btcData?.candles.slice(-15) ?? []).map(c => ({
+  const chartData = (btcData?.candles?.slice(-15) ?? []).map(c => ({
     time: format(new Date(c.time), 'HH:mm'),
     close: c.close,
     volume: c.volume,
