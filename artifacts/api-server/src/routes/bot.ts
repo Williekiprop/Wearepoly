@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { getBotState, startBot, stopBot, resetBot, setSizingMode } from "../lib/botEngine.js";
-import { hasProxy } from "../lib/proxiedFetch.js";
+import { hasProxy, setProxyUrl, getProxyDisplay } from "../lib/proxiedFetch.js";
 
 const router: IRouter = Router();
 
@@ -22,6 +22,7 @@ function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
     sizingMode: state.sizingMode,
     flatSizeUsdc: state.flatSizeUsdc,
     proxyEnabled: hasProxy(),
+    proxyDisplay: getProxyDisplay(),
     lastUpdated: state.lastUpdated.toISOString(),
   };
 }
@@ -61,6 +62,12 @@ router.patch("/bot/sizing", async (req, res): Promise<void> => {
   }
   const state = await setSizingMode(sizingMode, flatSizeUsdc);
   res.json(formatState(state));
+});
+
+router.patch("/bot/proxy", (req, res): void => {
+  const { proxyUrl } = req.body as { proxyUrl?: string };
+  setProxyUrl(proxyUrl ?? null);
+  res.json({ ok: true, proxyEnabled: hasProxy(), proxyDisplay: getProxyDisplay() });
 });
 
 router.post("/bot/stop", async (_req, res): Promise<void> => {

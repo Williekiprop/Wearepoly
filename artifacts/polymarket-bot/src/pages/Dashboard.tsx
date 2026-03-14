@@ -41,6 +41,8 @@ export default function Dashboard() {
   const [startBalanceInput, setStartBalanceInput] = useState("4");
   const [mode, setMode] = useState<"test" | "live">("test");
   const [sizingMode, setSizingModeLocal] = useState<"flat" | "kelly">("flat");
+  const [proxyInput, setProxyInput] = useState("");
+  const [proxyApplied, setProxyApplied] = useState(false);
 
   const botData = status.data;
   const marketData = analysis.data;
@@ -66,6 +68,16 @@ export default function Dashboard() {
         sizingMode,
         flatSizeUsdc: 1.0,
       } as any
+    });
+  };
+
+  const handleProxyApply = () => {
+    const url = proxyInput.trim() || null;
+    mutations.proxy.mutate(url, {
+      onSuccess: () => {
+        setProxyApplied(!!url);
+        if (!url) setProxyInput("");
+      }
     });
   };
 
@@ -305,10 +317,16 @@ export default function Dashboard() {
                     </button>
                   </div>
                   {mode === "live" ? (
+                    proxyEnabled ? (
+                      <div className="mt-2 bg-green-500/10 border border-green-500/30 rounded-lg px-3 py-2 text-[10px] font-mono text-green-400 leading-relaxed">
+                        <span className="font-bold">🛡 EU proxy active</span> — geoblock bypassed. Orders will route through your proxy.
+                      </div>
+                    ) : (
                     <div className="mt-2 bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2 text-[10px] font-mono text-destructive/90 leading-relaxed space-y-1">
-                      <div className="font-bold">⛔ Replit servers are US-based</div>
-                      <div>Polymarket blocks all US IPs. Orders will fail here. Run the API server locally or on a EU VPS to use live mode.</div>
+                      <div className="font-bold">⛔ No EU proxy set</div>
+                      <div>Paste your London proxy URL in the field below, then click APPLY to enable live orders.</div>
                     </div>
+                    )
                   ) : (
                     <p className="text-[10px] font-mono mt-1.5 text-warning leading-relaxed">
                       Paper trades on real Polymarket prices. P&amp;L reflects actual BTC momentum.
@@ -332,6 +350,54 @@ export default function Dashboard() {
                     />
                   </div>
                 </div>
+              </div>
+
+              {/* Proxy URL Input */}
+              <div>
+                <label className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block mb-2 flex items-center gap-1.5">
+                  EU Proxy URL
+                  {proxyEnabled && <span className="text-green-400 font-mono text-[9px] bg-green-500/15 border border-green-500/30 px-1.5 py-0.5 rounded">ACTIVE</span>}
+                </label>
+                {proxyEnabled && (botData as any)?.proxyDisplay && !proxyApplied && (
+                  <div className="mb-2 text-[10px] font-mono text-green-400 bg-green-500/10 border border-green-500/25 rounded px-3 py-2 truncate">
+                    {(botData as any).proxyDisplay}
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={proxyInput}
+                    onChange={(e) => { setProxyInput(e.target.value); setProxyApplied(false); }}
+                    placeholder="http://user:pass@host:port"
+                    className="flex-1 min-w-0 bg-input border border-border rounded-md h-9 px-3 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary placeholder:text-muted-foreground/40"
+                  />
+                  <button
+                    onClick={handleProxyApply}
+                    disabled={mutations.proxy.isPending}
+                    className={cn(
+                      "shrink-0 h-9 px-3 rounded-md text-xs font-bold font-mono tracking-wide border transition-colors",
+                      proxyApplied
+                        ? "bg-green-500/20 text-green-400 border-green-500/40"
+                        : "bg-primary/10 text-primary border-primary/40 hover:bg-primary/20"
+                    )}
+                  >
+                    {mutations.proxy.isPending ? "…" : proxyApplied ? "✓ ON" : "APPLY"}
+                  </button>
+                  {proxyEnabled && (
+                    <button
+                      onClick={() => { setProxyInput(""); mutations.proxy.mutate(null, { onSuccess: () => setProxyApplied(false) }); }}
+                      className="shrink-0 h-9 px-2 rounded-md text-xs font-mono text-destructive border border-destructive/30 hover:bg-destructive/10 transition-colors"
+                      title="Clear proxy"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+                <p className="text-[10px] font-mono mt-1.5 text-muted-foreground leading-relaxed">
+                  {proxyEnabled
+                    ? "Orders routing via EU proxy — geoblock bypassed. LIVE mode active."
+                    : "Paste your London/EU proxy to enable LIVE trading. SOCKS5 also works."}
+                </p>
               </div>
 
               {/* Sizing Toggle */}

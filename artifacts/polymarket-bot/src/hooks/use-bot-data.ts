@@ -80,6 +80,21 @@ export function useBotPolling() {
     }
   });
 
+  const proxyMutation = useMutation({
+    mutationFn: async (proxyUrl: string | null) => {
+      const res = await fetch(`${API_BASE}/bot/proxy`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ proxyUrl }),
+      });
+      if (!res.ok) throw new Error("Proxy update failed");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: getGetBotStatusQueryKey() });
+    },
+  });
+
   const sizingMutation = useMutation({
     mutationFn: async (payload: { sizingMode: "flat" | "kelly"; flatSizeUsdc?: number }) => {
       const res = await fetch(`${API_BASE}/bot/sizing`, {
@@ -105,6 +120,7 @@ export function useBotPolling() {
       stop: stopMutation,
       reset: resetMutation,
       sizing: sizingMutation,
+      proxy: proxyMutation,
     }
   };
 }
