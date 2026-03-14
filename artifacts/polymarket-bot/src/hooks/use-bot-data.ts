@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { 
   useGetBotStatus, 
   useGetMarketAnalysis, 
@@ -10,6 +10,8 @@ import {
   getGetBotStatusQueryKey,
   getGetTradesQueryKey
 } from "@workspace/api-client-react";
+
+const API_BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") + "/api";
 
 // Wrap generated hooks to add polling logic
 export function useBotPolling() {
@@ -78,6 +80,21 @@ export function useBotPolling() {
     }
   });
 
+  const sizingMutation = useMutation({
+    mutationFn: async (payload: { sizingMode: "flat" | "kelly"; flatSizeUsdc?: number }) => {
+      const res = await fetch(`${API_BASE}/bot/sizing`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error("Sizing update failed");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: getGetBotStatusQueryKey() });
+    },
+  });
+
   return {
     status: statusQuery,
     analysis: analysisQuery,
@@ -86,7 +103,8 @@ export function useBotPolling() {
     mutations: {
       start: startMutation,
       stop: stopMutation,
-      reset: resetMutation
+      reset: resetMutation,
+      sizing: sizingMutation,
     }
   };
 }

@@ -49,6 +49,8 @@ async function ensureBotState() {
       lastSignal: undefined,
       kellyFraction: 0.25,
       minEdgeThreshold: 0.03,
+      sizingMode: "flat",
+      flatSizeUsdc: 1.0,
     });
     const [state] = await db.select().from(botStateTable).limit(1);
     return state;
@@ -65,6 +67,8 @@ export async function startBot(opts: {
   startingBalance: number;
   kellyFraction?: number;
   minEdgeThreshold?: number;
+  sizingMode?: "flat" | "kelly";
+  flatSizeUsdc?: number;
 }) {
   stopPolling();
   const state = await ensureBotState();
@@ -80,6 +84,9 @@ export async function startBot(opts: {
       console.warn("[LIVE] Could not fetch wallet balance, using provided balance");
     }
   }
+
+  const sizingMode = opts.sizingMode ?? "kelly";
+  const flatSizeUsdc = opts.flatSizeUsdc ?? 1.0;
 
   await db
     .update(botStateTable)
@@ -97,11 +104,26 @@ export async function startBot(opts: {
       lastSignal: opts.mode === "live" ? "LIVE MODE — Connecting..." : "Paper trading on live feed...",
       kellyFraction: opts.kellyFraction ?? 0.25,
       minEdgeThreshold: opts.minEdgeThreshold ?? 0.03,
+      sizingMode,
+      flatSizeUsdc,
       lastUpdated: new Date(),
     })
     .where(eq(botStateTable.id, state.id));
 
   startPolling(state.id);
+  return getBotState();
+}
+
+export async function setSizingMode(mode: "flat" | "kelly", flatSizeUsdc?: number) {
+  const state = await ensureBotState();
+  await db
+    .update(botStateTable)
+    .set({
+      sizingMode: mode,
+      ...(flatSizeUsdc != null ? { flatSizeUsdc } : {}),
+      lastUpdated: new Date(),
+    })
+    .where(eq(botStateTable.id, state.id));
   return getBotState();
 }
 
@@ -197,18 +219,28 @@ async function runBotCycle(botId: number) {
     let shares = 0;
     let priceImpact = 0;
 
-    if (Math.abs(edge) >= freshState.minEdgeThreshold && freshState.balance >= 0.5) {
+    const minBalance = freshState.sizingMode === "flat" ? freshState.flatSizeUsdc : 0.5;
+    if (Math.abs(edge) >= freshState.minEdgeThreshold && freshState.balance >= minBalance) {
       signal = isBuyYes ? "BUY_YES" : "BUY_NO";
-      const kellyFull = calcKelly(winProb, entryPrice);
-      const kellyScaled = kellyFull * freshState.kellyFraction;
-      positionSize = Math.min(freshState.balance * kellyScaled, freshState.balance);
-      shares = entryPrice > 0 ? positionSize / entryPrice : 0;
-      const outcome = isBuyYes ? 0 : 1;
-      const { impact } = simulatePriceImpact([0, 0], B_PARAM, outcome, shares);
-      priceImpact = impact;
-      if (priceImpact > Math.abs(edge) * 0.5) {
-        positionSize *= 0.5;
-        shares *= 0.5;
+
+      if (freshState.sizingMode === "flat") {
+        // Flat sizing: always place exactly flatSizeUsdc per trade
+        positionSize = Math.min(freshState.flatSizeUsdc, freshState.balance);
+        shares = entryPrice > 0 ? positionSize / entryPrice : 0;
+        priceImpact = 0;
+      } else {
+        // Kelly sizing: quarter-Kelly formula
+        const kellyFull = calcKelly(winProb, entryPrice);
+        const kellyScaled = kellyFull * freshState.kellyFraction;
+        positionSize = Math.min(freshState.balance * kellyScaled, freshState.balance);
+        shares = entryPrice > 0 ? positionSize / entryPrice : 0;
+        const outcome = isBuyYes ? 0 : 1;
+        const { impact } = simulatePriceImpact([0, 0], B_PARAM, outcome, shares);
+        priceImpact = impact;
+        if (priceImpact > Math.abs(edge) * 0.5) {
+          positionSize *= 0.5;
+          shares *= 0.5;
+        }
       }
     }
 

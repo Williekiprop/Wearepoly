@@ -40,6 +40,7 @@ export default function Dashboard() {
   const { status, analysis, btc, trades, mutations } = useBotPolling();
   const [startBalanceInput, setStartBalanceInput] = useState("4");
   const [mode, setMode] = useState<"test" | "live">("test");
+  const [sizingMode, setSizingModeLocal] = useState<"flat" | "kelly">("flat");
 
   const botData = status.data;
   const marketData = analysis.data;
@@ -48,18 +49,31 @@ export default function Dashboard() {
 
   const isRunning = botData?.running || false;
 
-  // Keep toggle in sync with the actual running mode
+  // Keep toggles in sync with the actual running state
   useEffect(() => {
     if (botData?.mode) setMode(botData.mode as "test" | "live");
   }, [botData?.mode]);
+
+  useEffect(() => {
+    if ((botData as any)?.sizingMode) setSizingModeLocal((botData as any).sizingMode);
+  }, [(botData as any)?.sizingMode]);
 
   const handleStart = () => {
     mutations.start.mutate({
       data: {
         mode,
         startingBalance: parseFloat(startBalanceInput) || 4,
-      }
+        sizingMode,
+        flatSizeUsdc: 1.0,
+      } as any
     });
+  };
+
+  const handleSizingToggle = (newMode: "flat" | "kelly") => {
+    setSizingModeLocal(newMode);
+    if (isRunning) {
+      mutations.sizing.mutate({ sizingMode: newMode, flatSizeUsdc: 1.0 });
+    }
   };
 
   const formatBtcPct = (val?: number | null) =>
@@ -254,6 +268,42 @@ export default function Dashboard() {
                     />
                   </div>
                 </div>
+              </div>
+
+              {/* Sizing Toggle */}
+              <div>
+                <label className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block mb-2">Trade Sizing</label>
+                <div className={cn(
+                  "relative flex rounded-lg p-1 gap-1 bg-secondary/40 border border-border/50 transition-colors"
+                )}>
+                  <button
+                    onClick={() => handleSizingToggle("flat")}
+                    className={cn(
+                      "flex-1 py-2 px-3 rounded-md text-xs font-bold font-mono tracking-wide transition-all duration-200",
+                      sizingMode === "flat"
+                        ? "bg-primary/20 text-primary border border-primary/40 shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    FLAT $1
+                  </button>
+                  <button
+                    onClick={() => handleSizingToggle("kelly")}
+                    className={cn(
+                      "flex-1 py-2 px-3 rounded-md text-xs font-bold font-mono tracking-wide transition-all duration-200",
+                      sizingMode === "kelly"
+                        ? "bg-primary/20 text-primary border border-primary/40 shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    KELLY
+                  </button>
+                </div>
+                <p className="text-[10px] font-mono mt-1.5 text-muted-foreground leading-relaxed">
+                  {sizingMode === "flat"
+                    ? "Fixed $1.00 per trade — safe for testing live orders."
+                    : "Quarter-Kelly formula scales size to edge &amp; balance."}
+                </p>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
