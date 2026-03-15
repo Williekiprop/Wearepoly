@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useBotPolling, useBrowserOrderRelay } from "@/hooks/use-bot-data";
 import { 
   TerminalCard, 
@@ -38,6 +39,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 export default function Dashboard() {
   const { status, analysis, btc, trades, mutations } = useBotPolling();
+  const queryClient = useQueryClient();
   const [startBalanceInput, setStartBalanceInput] = useState("4");
   const [mode, setMode] = useState<"test" | "live">("test");
   const [sizingMode, setSizingModeLocal] = useState<"flat" | "kelly">("flat");
@@ -314,8 +316,22 @@ export default function Dashboard() {
               subValue={`Start: ${formatCurrency(botData?.startingBalance)}`}
               highlight="primary"
             />
-            <div className="p-3 bg-primary/10 rounded-full text-primary">
-              <Wallet className="w-5 h-5" />
+            <div className="flex flex-col items-end gap-2">
+              <div className="p-3 bg-primary/10 rounded-full text-primary">
+                <Wallet className="w-5 h-5" />
+              </div>
+              {botData?.mode === 'live' && (
+                <button
+                  onClick={async () => {
+                    await fetch(`${import.meta.env.BASE_URL?.replace(/\/$/, "")}/api/bot/sync-balance`, { method: "POST" });
+                    queryClient.invalidateQueries();
+                  }}
+                  className="text-[9px] font-mono text-primary/70 hover:text-primary border border-primary/20 hover:border-primary/50 rounded px-1.5 py-0.5 transition-colors"
+                  title="Fetch live wallet balance from Polygon"
+                >
+                  ↻ sync
+                </button>
+              )}
             </div>
           </TerminalCardContent>
         </TerminalCard>
@@ -406,7 +422,12 @@ export default function Dashboard() {
                   {mode === "live" ? (
                     proxyEnabled ? (
                       <div className="mt-2 bg-green-500/10 border border-green-500/30 rounded-lg px-3 py-2 text-[10px] font-mono text-green-400 leading-relaxed">
-                        <span className="font-bold">🛡 EU proxy active</span> — geoblock bypassed. Orders will route through your proxy.
+                        <span className="font-bold">🛡 EU proxy active</span> — geoblock bypassed. Orders route through proxy.
+                      </div>
+                    ) : (botData as any)?.geoblockCooldownSec > 0 ? (
+                      <div className="mt-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg px-3 py-2 text-[10px] font-mono text-yellow-400 leading-relaxed space-y-1">
+                        <div className="font-bold">⏱ Proxy geoblocked — auto-retrying in {Math.ceil((botData as any).geoblockCooldownSec / 60)}m</div>
+                        <div>Proxy URL is preserved. Bot will retry automatically when cooldown expires.</div>
                       </div>
                     ) : (
                     <div className="mt-2 bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2 text-[10px] font-mono text-destructive/90 leading-relaxed space-y-1">

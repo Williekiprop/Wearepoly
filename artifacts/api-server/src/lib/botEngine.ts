@@ -19,7 +19,7 @@ import { calcKelly, simulatePriceImpact } from "./lmsr.js";
 import { getBtcPriceData, estimate5mUpProb } from "./btcPrice.js";
 import { fetchCurrent5mMarket, getConnectionStatus, type FiveMinMarket } from "./polymarketClient.js";
 import { placeOrder, prepareOrderForBrowser, getClobTokenId, getWalletBalance, type PreparedBrowserOrder } from "./polymarketOrder.js";
-import { hasProxy, setProxyUrl } from "./proxiedFetch.js";
+import { hasProxy, setProxyUrl, markProxyGeoblocked } from "./proxiedFetch.js";
 
 const B_PARAM = 100;
 const MIN_LIVE_ORDER_USDC = 0.50;
@@ -59,6 +59,10 @@ const pendingSellTradeIds = new Set<number>();
 // Prevents re-queuing after a failed attempt within the same 5-minute window.
 // Cleared automatically when the window rolls over.
 const attemptedWindowEnds = new Set<number>();
+
+// Balance refresh: fetch on-chain wallet balance every N cycles and sync to DB
+let _balanceRefreshCounter = 0;
+const BALANCE_REFRESH_EVERY_N_CYCLES = 2; // every ~60 seconds
 
 const browserOrderQueue: PendingBrowserOrder[] = [];
 
@@ -215,6 +219,20 @@ export async function getBotState() {
   return ensureBotState();
 }
 
+/** Manually fetch on-chain wallet balance and sync to DB. Returns new balance or null. */
+export async function syncWalletBalance(): Promise<number | null> {
+  const state = await ensureBotState();
+  if (state.mode !== "live") return null;
+  const onChainBalance = await getWalletBalance();
+  if (onChainBalance !== null && onChainBalance > 0) {
+    await db.update(botStateTable).set({ balance: onChainBalance, lastUpdated: new Date() })
+      .where(eq(botStateTable.id, state.id));
+    console.log(`[LIVE] Manual balance sync: $${onChainBalance.toFixed(4)}`);
+    return onChainBalance;
+  }
+  return null;
+}
+
 export async function startBot(opts: {
   mode: "test" | "live";
   startingBalance: number;
@@ -358,6 +376,24 @@ async function runBotCycle(botId: number) {
   try {
     const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
     if (!state || !state.running) return;
+
+    // ── Periodic on-chain wallet balance sync (LIVE mode only) ──
+    if (state.mode === "live") {
+      _balanceRefreshCounter++;
+      if (_balanceRefreshCounter % BALANCE_REFRESH_EVERY_N_CYCLES === 0) {
+        const onChainBalance = await getWalletBalance();
+        if (onChainBalance !== null && onChainBalance > 0) {
+          const diff = Math.abs(onChainBalance - state.balance);
+          if (diff > 0.01) { // only update if meaningfully different (> 1¢)
+            console.log(`[LIVE] Balance sync: DB $${state.balance.toFixed(4)} → on-chain $${onChainBalance.toFixed(4)}`);
+            await db.update(botStateTable).set({
+              balance: onChainBalance,
+              lastUpdated: new Date(),
+            }).where(eq(botStateTable.id, botId));
+          }
+        }
+      }
+    }
 
     // Fetch live data in parallel
     const [btcData, market5m] = await Promise.all([
@@ -989,8 +1025,8 @@ async function executeLiveTrade(
     console.error(`[LIVE] Order failed: ${errorMsg}`);
     const isGeoblock = errorMsg.includes("restricted") || errorMsg.includes("geoblock") || errorMsg.includes("region");
     if (isGeoblock) {
-      console.warn("[LIVE] Proxy geoblocked — disabling proxy and switching to browser relay for this order.");
-      setProxyUrl(null); // disable proxy for the rest of the session
+      console.warn("[LIVE] Proxy geoblocked — suspending for 5 min (will auto-retry when VPN region changes).");
+      markProxyGeoblocked(); // 5-min cooldown; proxy URL preserved for auto-retry
       // Queue the same order via browser relay so the browser can submit it
       try {
         const prepared = await prepareOrderForBrowser({ tokenId, side: "BUY", price: limitPrice, sizeUsdc: orderSize });

@@ -16,6 +16,10 @@ let _runtimeUrl: string | null | undefined = undefined;
 let _agent: ProxyAgent | null = null;
 let _proxyFetch: typeof fetch | null = null;
 
+// Geoblock cooldown: after a geoblock, suspend the proxy for this many ms before retrying
+const GEOBLOCK_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+let _geoblockedUntil = 0;
+
 /** Normalise proxy URL — strip trailing slash, convert tcp:// → http:// */
 function cleanUrl(url: string): string {
   return url.trim()
@@ -24,6 +28,15 @@ function cleanUrl(url: string): string {
 }
 
 function getActiveUrl(): string | null {
+  // If proxy is in geoblock cooldown, return null (suspended, not cleared)
+  if (_geoblockedUntil > 0 && Date.now() < _geoblockedUntil) return null;
+  // Cooldown expired — reset so proxy can be retried
+  if (_geoblockedUntil > 0 && Date.now() >= _geoblockedUntil) {
+    _geoblockedUntil = 0;
+    _agent = null;
+    _proxyFetch = null;
+    console.log("[PROXY] Geoblock cooldown expired — re-enabling proxy for next attempt");
+  }
   // If user has explicitly set or cleared at runtime, respect that — never fall back to env var
   if (_runtimeUrl !== undefined) return _runtimeUrl ? cleanUrl(_runtimeUrl) : null;
   // Otherwise use the env var (startup default)
@@ -61,11 +74,25 @@ export function setProxyUrl(url: string | null): void {
   _runtimeUrl = url ? cleanUrl(url) : null;
   _agent = null;
   _proxyFetch = null;
+  _geoblockedUntil = 0; // always reset geoblock cooldown when user changes proxy
   if (_runtimeUrl) {
     console.log(`[PROXY] Set to: ${maskUrl(_runtimeUrl)}`);
   } else {
     console.log("[PROXY] Cleared.");
   }
+}
+
+/**
+ * Mark the current proxy as temporarily geoblocked.
+ * The proxy URL is NOT cleared — it will be retried after GEOBLOCK_COOLDOWN_MS.
+ * This allows automatic re-try when the user's VPN switches to a non-blocked region.
+ */
+export function markProxyGeoblocked(): void {
+  _geoblockedUntil = Date.now() + GEOBLOCK_COOLDOWN_MS;
+  _agent = null;
+  _proxyFetch = null;
+  const retryAt = new Date(_geoblockedUntil).toISOString();
+  console.warn(`[PROXY] Geoblocked — suspended until ${retryAt} (5 min cooldown)`);
 }
 
 /** Returns a password-masked copy of the URL for logging/display. */
@@ -76,7 +103,20 @@ export function maskUrl(url: string): string {
 /** Returns the active proxy URL (masked for display), or null if none. */
 export function getProxyDisplay(): string | null {
   const url = getActiveUrl();
-  return url ? maskUrl(url) : null;
+  if (url) return maskUrl(url);
+  // Show cooldown status if proxy URL exists but is temporarily suspended
+  const rawUrl = _runtimeUrl ?? process.env.PROXY_URL;
+  if (rawUrl && _geoblockedUntil > Date.now()) {
+    const secsLeft = Math.ceil((_geoblockedUntil - Date.now()) / 1000);
+    const minsLeft = Math.ceil(secsLeft / 60);
+    return `GEOBLOCKED — retrying in ${minsLeft}m (${maskUrl(cleanUrl(rawUrl))})`;
+  }
+  return null;
+}
+
+/** Returns time remaining in geoblock cooldown (ms), or 0 if not in cooldown. */
+export function getGeoblockCooldownMs(): number {
+  return Math.max(0, _geoblockedUntil - Date.now());
 }
 
 /** Returns true if a proxy is configured. */

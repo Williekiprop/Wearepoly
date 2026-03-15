@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
-import { getBotState, startBot, stopBot, resetBot, setSizingMode, dequeueBrowserOrder, completeBrowserOrder } from "../lib/botEngine.js";
-import { hasProxy, setProxyUrl, getProxyDisplay, testProxy, polyFetch } from "../lib/proxiedFetch.js";
+import { getBotState, startBot, stopBot, resetBot, setSizingMode, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance } from "../lib/botEngine.js";
+import { hasProxy, setProxyUrl, getProxyDisplay, getGeoblockCooldownMs, testProxy, polyFetch } from "../lib/proxiedFetch.js";
 import { ethers } from "ethers";
 import * as crypto from "crypto";
 
@@ -8,6 +8,7 @@ const router: IRouter = Router();
 
 function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
   const winRate = state.totalTrades > 0 ? state.winningTrades / state.totalTrades : 0;
+  const geoblockCooldownMs = getGeoblockCooldownMs();
   return {
     running: state.running,
     mode: state.mode,
@@ -25,6 +26,8 @@ function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
     flatSizeUsdc: state.flatSizeUsdc,
     proxyEnabled: hasProxy(),
     proxyDisplay: getProxyDisplay(),
+    geoblockCooldownMs,
+    geoblockCooldownSec: Math.ceil(geoblockCooldownMs / 1000),
     lastUpdated: state.lastUpdated.toISOString(),
   };
 }
@@ -85,6 +88,12 @@ router.post("/bot/stop", async (_req, res): Promise<void> => {
 router.post("/bot/reset", async (_req, res): Promise<void> => {
   const state = await resetBot();
   res.json(formatState(state));
+});
+
+router.post("/bot/sync-balance", async (_req, res): Promise<void> => {
+  const newBalance = await syncWalletBalance();
+  const state = await getBotState();
+  res.json({ ...formatState(state), syncedBalance: newBalance });
 });
 
 router.get("/bot/api-test", async (_req, res): Promise<void> => {
