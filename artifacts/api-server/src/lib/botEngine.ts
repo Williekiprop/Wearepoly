@@ -495,11 +495,32 @@ async function runBotCycle(botId: number) {
     const marketId = encode5mMarketId(market5m);
     const evPerShare = winProb * (1 - entryPrice) - (1 - winProb) * entryPrice;
 
-    // ── Step 3: Open new position (one per window) ──
+    // ── Step 3: Open new position, or flip if signal reversed ──
     if (freshState.mode === "test") {
       const openPositions = await db.select().from(tradesTable)
         .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
-      if (openPositions.length > 0) return;
+
+      if (openPositions.length > 0) {
+        const pos = openPositions[0];
+        const heldMs = Date.now() - pos.timestamp.getTime();
+        const signalFlipped = pos.direction !== direction;
+
+        if (signalFlipped && heldMs >= TEST_HOLD_MS) {
+          // Signal reversed and hold period satisfied — exit and flip
+          await closeTestPositionEarly(botId, pos, upPrice);
+          const [updatedState] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+          if (!updatedState || updatedState.balance < 1.0) return;
+          const newSize  = Math.min(positionSize, updatedState.balance);
+          const newShares = entryPrice > 0 ? newSize / entryPrice : 0;
+          await openTestPosition(botId, updatedState, {
+            direction, marketPrice: upPrice, edge, evPerShare,
+            kellyScaledPct: newSize / updatedState.balance, positionSize: newSize, shares: newShares, priceImpact: 0,
+          }, btcData.currentPrice, marketId);
+        } else if (signalFlipped) {
+          console.log(`[5M TEST] Flip signal (${pos.direction}→${direction}) but held only ${Math.round(heldMs/1000)}s — waiting for ${TEST_HOLD_MS/1000}s min`);
+        }
+        return;
+      }
 
       await openTestPosition(botId, freshState, {
         direction, marketPrice: upPrice, edge, evPerShare,
@@ -744,6 +765,42 @@ async function openTestPosition(
   const dirLabel = direction === "YES" ? "UP" : "DOWN";
   const entryPriceForLog = direction === "YES" ? marketPrice : 1 - marketPrice;
   console.log(`[5M TEST] Opened ${dirLabel} position: $${positionSize.toFixed(3)} @ ${(entryPriceForLog * 100).toFixed(1)}¢`);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// TEST MODE — Early mark-to-market exit (flip or take-profit before window end)
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function closeTestPositionEarly(
+  botId: number,
+  pos: { id: number; direction: "YES" | "NO"; marketPrice: number; shares: number; positionSize: number },
+  exitUpPrice: number,   // current Polymarket UP token price
+) {
+  const weBoughtUp = pos.direction === "YES";
+  // Exit at current market price for the side we hold
+  const exitPrice = weBoughtUp ? exitUpPrice : 1 - exitUpPrice;
+  const entryPrice = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
+  const pnl = pos.shares * (exitPrice - entryPrice);
+  const returnedCapital = pos.positionSize + pnl;
+
+  const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+  if (!st) return;
+
+  await db.update(tradesTable).set({
+    status: "closed", exitPrice, pnl, resolvedAt: new Date(),
+  }).where(eq(tradesTable.id, pos.id));
+
+  await db.update(botStateTable).set({
+    balance: st.balance + returnedCapital,
+    totalTrades: st.totalTrades + 1,
+    winningTrades: pnl >= 0 ? st.winningTrades + 1 : st.winningTrades,
+    losingTrades:  pnl <  0 ? st.losingTrades  + 1 : st.losingTrades,
+    totalPnl: st.totalPnl + pnl,
+    lastUpdated: new Date(),
+  }).where(eq(botStateTable.id, botId));
+
+  const dir = weBoughtUp ? "UP" : "DOWN";
+  console.log(`[5M TEST] Early exit ${dir} @ ${(exitPrice * 100).toFixed(1)}¢ | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
