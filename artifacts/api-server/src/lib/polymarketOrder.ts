@@ -277,8 +277,8 @@ export async function getWalletBalance(): Promise<number | null> {
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return null;
-    const data = await res.json() as { balance?: string };
-    return data.balance ? parseFloat(data.balance) : null;
+    const data = await res.json() as { balance?: string; allowance?: string };
+    return data.balance !== undefined ? parseFloat(data.balance) : null;
   } catch {
     return null;
   }
