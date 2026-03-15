@@ -147,36 +147,37 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
 }
 
 /**
- * Estimate fair-value probability for a BTC binary contract.
+ * Estimate true probability that BTC goes UP in the next 5-minute window.
  *
- * The market price of the YES token represents the crowd's probability
- * estimate for the specific binary event (e.g. "BTC > $X by date Y").
- * We start from that market consensus and adjust based on recent BTC
- * momentum — if BTC is strongly trending up, the binary probability
- * should be slightly higher than the market currently implies.
+ * Used for the rolling btc-updown-5m markets on Polymarket.
+ * Strategy: mean-reversion + momentum blend.
+ *   - Base probability is 50% (coin flip when flat)
+ *   - Recent BTC momentum shifts the estimate away from 50%
+ *   - 5m change of +1% → prob_up rises by +15% (momentum follows through)
+ *   - 1h change of +1% → prob_up rises by +3% (longer-term trend)
  *
- * Calibration:
- *   - 1% 5m BTC rally  → +5%  relative adjustment to market prob
- *   - 1% 1h BTC change → +1.5% relative adjustment
- *   - e.g. market = 4.5¢, BTC +2.5% in 5m → fair value = 4.5¢ × 1.125 = 5.06¢
- *   - Edge = 5.06¢ − 4.5¢ = 0.56¢ (1.25% edge → triggers buy)
+ * Example: BTC flat (change5m≈0) and market prices UP at 78.5%
+ *   → our model says ~50%, market overprices UP → edge to BUY DOWN
  *
- * @param marketYesPrice current Polymarket YES token price (0–1). If omitted,
- *   falls back to 0.5 (test mode / unavailable market).
+ * Example: BTC +1.5% in 5m and market prices UP at 40%
+ *   → our model says 72.5%, market underprices UP → edge to BUY UP
+ */
+export function estimate5mUpProb(btcData: BtcPriceData): number {
+  const { change5m, change1h } = btcData;
+  const momentum = change5m * 0.15 + change1h * 0.03;
+  return Math.min(0.95, Math.max(0.05, 0.5 + momentum));
+}
+
+/**
+ * @deprecated Use estimate5mUpProb for 5-minute markets.
+ * Kept for backward compat with any remaining callers.
  */
 export function estimateTrueProb(
   btcData: BtcPriceData,
   marketYesPrice: number = 0.5,
 ): number {
   const { change5m, change1h } = btcData;
-
-  // Relative momentum factor: fraction by which we adjust the market prob.
-  // change5m is in % (e.g. 2.0 = 2%). We scale so that a 2% 5m move
-  // creates a 10% relative adjustment to the implied probability.
   const momentumFactor = change5m * 0.05 + change1h * 0.015;
-
   const prob = marketYesPrice * (1 + momentumFactor);
-
-  // Keep probability inside a sensible range
   return Math.min(0.95, Math.max(0.005, prob));
 }

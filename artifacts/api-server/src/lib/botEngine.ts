@@ -16,8 +16,8 @@
 import { db, botStateTable, tradesTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { calcKelly, simulatePriceImpact } from "./lmsr.js";
-import { getBtcPriceData, estimateTrueProb } from "./btcPrice.js";
-import { getBestBtcMarketPrice, getConnectionStatus } from "./polymarketClient.js";
+import { getBtcPriceData, estimate5mUpProb } from "./btcPrice.js";
+import { fetchCurrent5mMarket, getConnectionStatus, type FiveMinMarket } from "./polymarketClient.js";
 import { placeOrder, prepareOrderForBrowser, getClobTokenId, getWalletBalance, type PreparedBrowserOrder } from "./polymarketOrder.js";
 import { hasProxy, setProxyUrl } from "./proxiedFetch.js";
 
@@ -339,128 +339,280 @@ function stopPolling() {
 // MAIN CYCLE
 // ──────────────────────────────────────────────────────────────────────────────
 
+// Encode 5m market info into the marketId field so we can recover it later
+function encode5mMarketId(market: FiveMinMarket): string {
+  return `btc5m:${market.windowEnd}:${market.conditionId}`;
+}
+function decode5mMarketId(marketId: string): { windowEnd: number; conditionId: string } | null {
+  const parts = marketId.split(":");
+  if (parts[0] !== "btc5m" || parts.length < 3) return null;
+  return { windowEnd: parseInt(parts[1]), conditionId: parts.slice(2).join(":") };
+}
+
 async function runBotCycle(botId: number) {
   try {
     const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
     if (!state || !state.running) return;
 
     // Fetch live data in parallel
-    const [btcData, polyData] = await Promise.all([
+    const [btcData, market5m] = await Promise.all([
       getBtcPriceData(),
-      getBestBtcMarketPrice(),
+      fetchCurrent5mMarket(),
     ]);
 
-    const marketYesPrice =
-      polyData.connected && polyData.yesPrice > 0.01 && polyData.yesPrice < 0.99
-        ? polyData.yesPrice
-        : 0.5;
-    const marketId = polyData.market?.conditionId ?? "btc-sim-market";
-    const trueProb = estimateTrueProb(btcData, marketYesPrice);
-    const edge = trueProb - marketYesPrice;
-    const evPerShare = trueProb * (1 - marketYesPrice) - (1 - trueProb) * marketYesPrice;
+    if (!market5m) {
+      console.log("[BOT] Could not fetch 5m market — retrying next cycle");
+      return;
+    }
 
-    const isBuyYes = edge > 0;
-    const direction: "YES" | "NO" = isBuyYes ? "YES" : "NO";
-    const entryPrice = isBuyYes ? marketYesPrice : 1 - marketYesPrice;
-    const winProb = isBuyYes ? trueProb : 1 - trueProb;
-
-    // ── Step 1: Manage open positions ──
+    // ── Step 1: Resolve / manage open positions ──
     if (state.mode === "test") {
-      // Test mode: close matured paper positions (mark-to-model)
-      await closeMaturedTestPositions(botId, state, marketYesPrice, trueProb);
+      await resolve5mTestPositions(botId, btcData.currentPrice);
     } else {
-      // Live mode: close matured real positions by queuing SELL orders
-      await closeMatureLivePositions(botId, marketYesPrice, polyData.market?.conditionId ?? null);
+      await resolve5mLivePositions(botId);
     }
 
     // Re-read state after potential balance updates from closures
     const [freshState] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
     if (!freshState?.running) return;
 
-    // ── Step 2: Compute signal & sizing ──
+    // ── Step 2: 5m market signal ──
+    // prob_up = our estimated probability that BTC ends this window HIGHER
+    const probUp = estimate5mUpProb(btcData);
+    const upPrice = market5m.upPrice;
+    const downPrice = market5m.downPrice;
+
+    // Edge: positive means BUY UP, negative means BUY DOWN
+    const edgeUp = probUp - upPrice;
+    const isBuyUp = edgeUp > 0;
+    const direction: "YES" | "NO" = isBuyUp ? "YES" : "NO"; // YES=UP, NO=DOWN in DB
+    const entryPrice = isBuyUp ? upPrice : downPrice;
+    const winProb = isBuyUp ? probUp : 1 - probUp;
+    const edge = isBuyUp ? edgeUp : -edgeUp; // always positive
+
+    // Skip if <60 seconds left in window — too late to get a good fill
+    const MIN_SECS_TO_ENTER = 60;
+    const tooLate = market5m.secondsRemaining < MIN_SECS_TO_ENTER;
+
     let signal: "BUY_YES" | "BUY_NO" | "NO_TRADE" = "NO_TRADE";
     let positionSize = 0;
     let shares = 0;
-    let priceImpact = 0;
 
     const minBalance = freshState.sizingMode === "flat" ? freshState.flatSizeUsdc : 0.5;
-    if (Math.abs(edge) >= freshState.minEdgeThreshold && freshState.balance >= minBalance) {
-      signal = isBuyYes ? "BUY_YES" : "BUY_NO";
+    if (!tooLate && edge >= freshState.minEdgeThreshold && freshState.balance >= minBalance) {
+      signal = isBuyUp ? "BUY_YES" : "BUY_NO";
 
       if (freshState.sizingMode === "flat") {
-        // Flat sizing: always place exactly flatSizeUsdc per trade
         positionSize = Math.min(freshState.flatSizeUsdc, freshState.balance);
         shares = entryPrice > 0 ? positionSize / entryPrice : 0;
-        priceImpact = 0;
       } else {
-        // Kelly sizing: quarter-Kelly formula, floored at $1 minimum (Polymarket CLOB minimum)
         const CLOB_MIN_ORDER = 1.0;
         const kellyFull = calcKelly(winProb, entryPrice);
         const kellyScaled = kellyFull * freshState.kellyFraction;
-        const kellyAmount = freshState.balance * kellyScaled;
-        // Use kelly amount but respect $1 floor; never exceed balance
-        positionSize = Math.min(Math.max(kellyAmount, CLOB_MIN_ORDER), freshState.balance);
+        positionSize = Math.min(Math.max(freshState.balance * kellyScaled, CLOB_MIN_ORDER), freshState.balance);
         shares = entryPrice > 0 ? positionSize / entryPrice : 0;
-        const outcome = isBuyYes ? 0 : 1;
-        const { impact } = simulatePriceImpact([0, 0], B_PARAM, outcome, shares);
-        priceImpact = impact;
-        if (priceImpact > Math.abs(edge) * 0.5) {
-          positionSize *= 0.5;
-          shares *= 0.5;
-        }
       }
     }
 
-    // Always log signal + edge so the user can see what the model is seeing
-    const edgePct = (edge * 100).toFixed(2);
-    const mktPct  = (marketYesPrice * 100).toFixed(2);
-    const truPct  = (trueProb * 100).toFixed(2);
+    // Always log signal so user can see what the model is doing
+    const upPct    = (upPrice * 100).toFixed(1);
+    const downPct  = (downPrice * 100).toFixed(1);
+    const probUpPct = (probUp * 100).toFixed(1);
+    const edgePct  = (edge * 100).toFixed(2);
+    const secStr   = market5m.secondsRemaining > 0 ? `${market5m.secondsRemaining}s left` : "RESOLVED";
     if (signal === "NO_TRADE") {
-      console.log(`[MODEL] NO_TRADE | market=${mktPct}¢ trueProb=${truPct}¢ edge=${edgePct}% (threshold±${(freshState.minEdgeThreshold*100).toFixed(1)}%)`);
+      const reason = tooLate ? "TOO_LATE" : `edge ${edgePct}% < threshold ${(freshState.minEdgeThreshold*100).toFixed(1)}%`;
+      console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% | ${reason} | ${secStr}`);
     } else {
-      console.log(`[MODEL] ${signal} | market=${mktPct}¢ trueProb=${truPct}¢ edge=+${edgePct}% size=$${positionSize.toFixed(2)}`);
+      const dir = isBuyUp ? "BUY_UP" : "BUY_DOWN";
+      console.log(`[5M] ${dir} | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% edge=+${edgePct}% size=$${positionSize.toFixed(2)} | ${secStr}`);
     }
 
     await db
       .update(botStateTable)
-      .set({ currentMarketPrice: marketYesPrice, lastSignal: signal, lastUpdated: new Date() })
+      .set({ currentMarketPrice: upPrice, lastSignal: signal, lastUpdated: new Date() })
       .where(eq(botStateTable.id, botId));
 
-    // Polymarket CLOB minimum order is $1 USDC; skip if Kelly sizing is below that
     if (signal === "NO_TRADE" || positionSize < 1.0 || shares <= 0) return;
 
-    // ── Step 3: Open a new position (one at a time) ──
+    const marketId = encode5mMarketId(market5m);
+    const evPerShare = winProb * (1 - entryPrice) - (1 - winProb) * entryPrice;
+
+    // ── Step 3: Open new position (one per window) ──
     if (freshState.mode === "test") {
       const openPositions = await db.select().from(tradesTable)
         .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
-      if (openPositions.length > 0) return; // wait for it to close
+      if (openPositions.length > 0) return;
 
       await openTestPosition(botId, freshState, {
-        direction, marketPrice: marketYesPrice, edge, evPerShare,
-        kellyScaledPct: positionSize / freshState.balance, positionSize, shares, priceImpact,
+        direction, marketPrice: upPrice, edge, evPerShare,
+        kellyScaledPct: positionSize / freshState.balance, positionSize, shares, priceImpact: 0,
       }, btcData.currentPrice, marketId);
     } else {
-      // LIVE mode: only buy if no open live positions AND no pending BUY already queued
       const openLivePositions = await db.select().from(tradesTable)
         .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "live")));
       if (openLivePositions.length > 0) {
-        console.log(`[LIVE] Holding — ${openLivePositions.length} open position(s), waiting to close`);
+        const pos = openLivePositions[0];
+        const info = decode5mMarketId(pos.marketId ?? "");
+        const secsLeft = info ? Math.max(0, info.windowEnd - Math.floor(Date.now() / 1000)) : 0;
+        console.log(`[LIVE] Holding ${pos.direction === "YES" ? "UP" : "DOWN"} | window closes in ${secsLeft}s`);
         return;
       }
-      // Also skip if there's already a pending BUY in the browser relay queue
       const hasPendingBuy = browserOrderQueue.some(o => o.botId === botId && o.tradeContext.orderSide === "BUY");
       if (hasPendingBuy) {
         console.log("[LIVE] Skipping — BUY already queued, awaiting browser relay");
         return;
       }
 
+      const tokenId = direction === "YES" ? market5m.upTokenId : market5m.downTokenId;
       await executeLiveTrade(botId, freshState, {
-        direction, marketPrice: marketYesPrice, edge, evPerShare,
-        kellyScaledPct: positionSize / freshState.balance, positionSize, shares, priceImpact,
-      }, btcData.currentPrice, marketId, polyData.market?.conditionId ?? null);
+        direction, marketPrice: upPrice, edge, evPerShare,
+        kellyScaledPct: positionSize / freshState.balance, positionSize, shares, priceImpact: 0,
+      }, btcData.currentPrice, marketId, market5m.conditionId, tokenId);
     }
   } catch (err) {
     console.error("Bot cycle error:", err);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 5-MINUTE RESOLUTION — TEST mode
+// After windowEnd, determine UP/DOWN winner by comparing current BTC vs entry.
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function resolve5mTestPositions(botId: number, currentBtcPrice: number) {
+  const openPositions = await db
+    .select().from(tradesTable)
+    .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
+
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  for (const pos of openPositions) {
+    const info = decode5mMarketId(pos.marketId ?? "");
+    if (!info) continue; // legacy trade, skip
+
+    if (nowSec < info.windowEnd) continue; // window not over yet
+
+    // Determine winner: UP wins if BTC price >= price at entry
+    const entryBtc = pos.btcPriceAtEntry ?? currentBtcPrice;
+    const upWon = currentBtcPrice >= entryBtc;
+
+    // Did we pick the winner?
+    const weBoughtUp = pos.direction === "YES";
+    const weWon = weBoughtUp ? upWon : !upWon;
+
+    const entryPrice = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
+    const exitValue = weWon ? 1.0 : 0.0;
+    const pnl = pos.shares * (exitValue - entryPrice);
+    const returnedCapital = pos.positionSize + pnl; // 0 if lost, 2x if won big
+
+    const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+    if (!st) continue;
+
+    await db.update(tradesTable).set({
+      status: "closed", exitPrice: exitValue, pnl, resolvedAt: new Date(),
+    }).where(eq(tradesTable.id, pos.id));
+
+    await db.update(botStateTable).set({
+      balance: st.balance + returnedCapital,
+      totalTrades: st.totalTrades + 1,
+      winningTrades: weWon ? st.winningTrades + 1 : st.winningTrades,
+      losingTrades: weWon ? st.losingTrades : st.losingTrades + 1,
+      totalPnl: st.totalPnl + pnl,
+      lastUpdated: new Date(),
+    }).where(eq(botStateTable.id, botId));
+
+    const direction = weBoughtUp ? "UP" : "DOWN";
+    const winner = upWon ? "UP" : "DOWN";
+    const result = weWon ? "WON" : "LOST";
+    console.log(
+      `[5M] ${result} ${direction} position | BTC ${entryBtc.toFixed(0)} → ${currentBtcPrice.toFixed(0)} ` +
+      `(winner: ${winner}) | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`
+    );
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 5-MINUTE RESOLUTION — LIVE mode
+// After windowEnd, query the CLOB to see which side won, then settle P&L.
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function resolve5mLivePositions(botId: number) {
+  const openLive = await db.select().from(tradesTable)
+    .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "live")));
+
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  for (const pos of openLive) {
+    if (pendingSellTradeIds.has(pos.id)) continue;
+
+    const info = decode5mMarketId(pos.marketId ?? "");
+    if (!info) continue;
+
+    if (nowSec < info.windowEnd) continue; // window not done yet
+
+    // Query CLOB to see who won
+    try {
+      const clobRes = await import("./proxiedFetch.js").then(m =>
+        m.polyFetch(`https://clob.polymarket.com/markets/${info.conditionId}`, {
+          signal: AbortSignal.timeout(8000),
+        })
+      );
+      if (!clobRes.ok) continue;
+
+      const clobData = await clobRes.json() as {
+        tokens: Array<{ token_id: string; outcome: string; price: number; winner: boolean }>;
+      };
+
+      const upToken = clobData.tokens?.find(t => t.outcome.toLowerCase() === "up");
+      const downToken = clobData.tokens?.find(t => t.outcome.toLowerCase() === "down");
+
+      const upWon = upToken?.winner === true;
+      const downWon = downToken?.winner === true;
+
+      if (!upWon && !downWon) {
+        // Market not yet resolved on-chain
+        continue;
+      }
+
+      const weBoughtUp = pos.direction === "YES";
+      const weWon = weBoughtUp ? upWon : downWon;
+
+      const entryPrice = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
+      const exitValue = weWon ? 1.0 : 0.0;
+      const pnl = pos.shares * (exitValue - entryPrice);
+      const returnedCapital = pos.positionSize + pnl;
+
+      const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+      if (!st) continue;
+
+      await db.update(tradesTable).set({
+        status: "closed", exitPrice: exitValue, pnl, resolvedAt: new Date(),
+      }).where(eq(tradesTable.id, pos.id));
+
+      await db.update(botStateTable).set({
+        balance: st.balance + returnedCapital,
+        totalTrades: st.totalTrades + 1,
+        winningTrades: weWon ? st.winningTrades + 1 : st.winningTrades,
+        losingTrades: weWon ? st.losingTrades : st.losingTrades + 1,
+        totalPnl: st.totalPnl + pnl,
+        lastUpdated: new Date(),
+      }).where(eq(botStateTable.id, botId));
+
+      const direction = weBoughtUp ? "UP" : "DOWN";
+      const winner = upWon ? "UP" : "DOWN";
+      const result = weWon ? "WON" : "LOST";
+      console.log(`[LIVE 5M] ${result} ${direction} | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
+
+      // Sync wallet balance after resolution
+      const walletBal = await getWalletBalance();
+      if (walletBal !== null && walletBal > 0) {
+        await db.update(botStateTable).set({ balance: walletBal, lastUpdated: new Date() })
+          .where(eq(botStateTable.id, botId));
+      }
+    } catch (err) {
+      console.error(`[LIVE 5M] resolve error for trade #${pos.id}:`, err);
+    }
   }
 }
 
@@ -505,7 +657,9 @@ async function openTestPosition(
     })
     .where(eq(botStateTable.id, botId));
 
-  console.log(`[TEST] Opened ${direction} position: $${positionSize.toFixed(3)} @ ${(marketPrice * 100).toFixed(1)}¢ YES price`);
+  const dirLabel = direction === "YES" ? "UP" : "DOWN";
+  const entryPriceForLog = direction === "YES" ? marketPrice : 1 - marketPrice;
+  console.log(`[5M TEST] Opened ${dirLabel} position: $${positionSize.toFixed(3)} @ ${(entryPriceForLog * 100).toFixed(1)}¢`);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -586,14 +740,34 @@ async function closeMaturedTestPositions(
 }
 
 async function forceCloseOpenTestPositions(botId: number) {
-  const state = await ensureBotState();
-  const [polyData, btcData] = await Promise.all([
-    getBestBtcMarketPrice().catch(() => null),
-    getBtcPriceData().catch(() => null),
-  ]);
-  const currentYesPrice = polyData?.yesPrice ?? 0.5;
-  const currentTrueProb = btcData ? estimateTrueProb(btcData, currentYesPrice) : currentYesPrice;
-  await closeMaturedTestPositions(botId, state, currentYesPrice, currentTrueProb);
+  const btcData = await getBtcPriceData().catch(() => null);
+  const currentBtcPrice = btcData?.currentPrice ?? 0;
+  // Force-close by treating all open positions as if window has ended
+  const openPositions = await db
+    .select().from(tradesTable)
+    .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
+  for (const pos of openPositions) {
+    const entryBtc = pos.btcPriceAtEntry ?? currentBtcPrice;
+    const upWon = currentBtcPrice >= entryBtc;
+    const weBoughtUp = pos.direction === "YES";
+    const weWon = weBoughtUp ? upWon : !upWon;
+    const entryPrice = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
+    const exitValue = weWon ? 1.0 : 0.0;
+    const pnl = pos.shares * (exitValue - entryPrice);
+    await db.update(tradesTable).set({ status: "closed", exitPrice: exitValue, pnl, resolvedAt: new Date() })
+      .where(eq(tradesTable.id, pos.id));
+    const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+    if (st) {
+      await db.update(botStateTable).set({
+        balance: st.balance + pos.positionSize + pnl,
+        totalTrades: st.totalTrades + 1,
+        winningTrades: weWon ? st.winningTrades + 1 : st.winningTrades,
+        losingTrades: weWon ? st.losingTrades : st.losingTrades + 1,
+        totalPnl: st.totalPnl + pnl,
+        lastUpdated: new Date(),
+      }).where(eq(botStateTable.id, botId));
+    }
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -726,6 +900,7 @@ async function executeLiveTrade(
   btcPrice: number,
   marketId: string,
   conditionId: string | null,
+  preloadedTokenId?: string,
 ) {
   const { direction, marketPrice, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
 
@@ -735,8 +910,8 @@ async function executeLiveTrade(
     return;
   }
 
-  let tokenId: string | null = null;
-  if (conditionId) tokenId = await getClobTokenId(conditionId, direction);
+  let tokenId: string | null = preloadedTokenId ?? null;
+  if (!tokenId && conditionId) tokenId = await getClobTokenId(conditionId, direction);
 
   if (!tokenId) {
     console.error(`[LIVE] Could not get CLOB token ID for ${direction} on ${conditionId}`);
@@ -830,47 +1005,60 @@ async function executeLiveTrade(
 
 export async function getMarketAnalysis() {
   const state = await ensureBotState();
-  const [btcData, polyData] = await Promise.all([getBtcPriceData(), getBestBtcMarketPrice()]);
+  const [btcData, market5m] = await Promise.all([getBtcPriceData(), fetchCurrent5mMarket()]);
 
-  const marketYesPrice =
-    polyData.connected && polyData.yesPrice > 0.01 && polyData.yesPrice < 0.99
-      ? polyData.yesPrice : 0.5;
-  const trueProb = estimateTrueProb(btcData, marketYesPrice);
+  const upPrice = market5m?.upPrice ?? 0.5;
+  const downPrice = market5m?.downPrice ?? 0.5;
+  const probUp = estimate5mUpProb(btcData);
 
-  const edge = trueProb - marketYesPrice;
-  const evPerShare = trueProb * (1 - marketYesPrice) - (1 - trueProb) * marketYesPrice;
-  const isBuyYes = edge > 0;
-  const entryPrice = isBuyYes ? marketYesPrice : 1 - marketYesPrice;
-  const winProb = isBuyYes ? trueProb : 1 - trueProb;
+  const edgeUp = probUp - upPrice;
+  const isBuyUp = edgeUp > 0;
+  const edge = isBuyUp ? edgeUp : -edgeUp;
+  const entryPrice = isBuyUp ? upPrice : downPrice;
+  const winProb = isBuyUp ? probUp : 1 - probUp;
+  const evPerShare = winProb * (1 - entryPrice) - (1 - winProb) * entryPrice;
 
+  const tooLate = (market5m?.secondsRemaining ?? 0) < 60;
   let signal: "BUY_YES" | "BUY_NO" | "NO_TRADE" = "NO_TRADE";
   let positionSize = 0;
-  let priceImpact = 0;
 
-  if (Math.abs(edge) >= state.minEdgeThreshold) {
-    signal = isBuyYes ? "BUY_YES" : "BUY_NO";
-    const kellyFull = calcKelly(winProb, entryPrice);
-    const kellyScaled = kellyFull * state.kellyFraction;
-    positionSize = Math.min(state.balance * kellyScaled, state.balance);
-    const shares = entryPrice > 0 ? positionSize / entryPrice : 0;
-    const { impact } = simulatePriceImpact([0, 0], B_PARAM, isBuyYes ? 0 : 1, shares);
-    priceImpact = impact;
+  if (!tooLate && edge >= state.minEdgeThreshold) {
+    signal = isBuyUp ? "BUY_YES" : "BUY_NO";
+    if (state.sizingMode === "flat") {
+      positionSize = Math.min(state.flatSizeUsdc, state.balance);
+    } else {
+      const kellyFull = calcKelly(winProb, entryPrice);
+      positionSize = Math.min(state.balance * kellyFull * state.kellyFraction, state.balance);
+    }
   }
 
   return {
-    marketId: polyData.market?.conditionId ?? "btc-sim-market",
-    marketTitle: polyData.market?.question ?? "Bitcoin Price Market (simulated)",
-    currentPrice: marketYesPrice,
+    // 5m market data
+    marketId: market5m?.conditionId ?? "btc-5m-sim",
+    marketTitle: market5m?.title ?? "BTC Up or Down — 5-minute window",
+    upPrice,
+    downPrice,
+    upTokenId: market5m?.upTokenId ?? null,
+    downTokenId: market5m?.downTokenId ?? null,
+    windowEnd: market5m?.windowEnd ?? null,
+    secondsRemaining: market5m?.secondsRemaining ?? null,
+    windowResolved: market5m?.resolved ?? false,
+    // Compat fields (currentPrice = UP price for existing dashboard panels)
+    currentPrice: upPrice,
     liquidityParam: B_PARAM,
     qYes: 0, qNo: 0,
+    // BTC
     btcCurrentPrice: btcData.currentPrice,
     btcPriceChange5m: btcData.change5m,
     btcPriceChange1h: btcData.change1h,
-    estimatedTrueProb: trueProb,
-    edge, signal, evPerShare,
-    recommendedDirection: (edge > 0 ? "YES" : edge < 0 ? "NO" : null) as "YES" | "NO" | null,
+    // Model
+    estimatedTrueProb: probUp,
+    edge: isBuyUp ? edgeUp : -edgeUp, // signed: + means BUY_UP, - means BUY_DOWN
+    signal, evPerShare,
+    recommendedDirection: (isBuyUp ? "YES" : "NO") as "YES" | "NO",
     kellySize: positionSize,
-    priceImpact,
+    priceImpact: 0,
+    minEdgeThreshold: state.minEdgeThreshold,
     analysisTime: new Date().toISOString(),
   };
 }

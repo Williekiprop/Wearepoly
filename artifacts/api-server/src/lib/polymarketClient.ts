@@ -162,6 +162,108 @@ export async function getBestBtcMarketPrice(): Promise<{
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 5-MINUTE UP/DOWN MARKETS
+// Rolling binary markets that resolve every 5 minutes.
+// Slug format: btc-updown-5m-{unixTimestamp} where the timestamp is the
+// Unix epoch of the START of the 5-minute window (rounded to 300s boundary).
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface FiveMinMarket {
+  conditionId: string;
+  title: string;
+  upTokenId: string;
+  downTokenId: string;
+  upPrice: number;
+  downPrice: number;
+  windowStart: number;
+  windowEnd: number;
+  secondsRemaining: number;
+  resolved: boolean;
+}
+
+let fiveMinCache: { market: FiveMinMarket; fetchedAt: number } | null = null;
+const FIVE_MIN_CACHE_TTL = 5_000; // 5s — price updates fast during the window
+
+export async function fetchCurrent5mMarket(): Promise<FiveMinMarket | null> {
+  if (fiveMinCache && Date.now() - fiveMinCache.fetchedAt < FIVE_MIN_CACHE_TTL) {
+    const m = fiveMinCache.market;
+    const secsLeft = Math.max(0, m.windowEnd - Math.floor(Date.now() / 1000));
+    return { ...m, secondsRemaining: secsLeft, resolved: secsLeft <= 0 };
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  // Try the current window and the next one (sometimes next is already open)
+  const windows = [
+    Math.floor(now / 300) * 300,
+    Math.floor(now / 300) * 300 - 300, // previous window, in case current not created yet
+  ];
+
+  for (const windowStart of windows) {
+    const slug = `btc-updown-5m-${windowStart}`;
+    try {
+      const res = await polyFetch(
+        `${GAMMA_API}/events?slug=${slug}`,
+        { signal: AbortSignal.timeout(8000) },
+      );
+      if (!res.ok) continue;
+
+      const data = await res.json() as Array<{
+        title: string;
+        slug: string;
+        active: boolean;
+        endDate: string;
+        markets: Array<{
+          conditionId: string;
+          outcomes: string;
+          outcomePrices: string;
+          clobTokenIds: string;
+          endDate: string;
+        }>;
+      }>;
+
+      const evt = Array.isArray(data) ? data[0] : data as unknown as typeof data[0];
+      if (!evt || !evt.markets?.length) continue;
+
+      const m = evt.markets[0];
+      let outcomes: string[] = ["Up", "Down"];
+      let prices: number[] = [0.5, 0.5];
+      let tokens: string[] = [];
+      try { outcomes = JSON.parse(m.outcomes); } catch {}
+      try { prices = JSON.parse(m.outcomePrices).map(Number); } catch {}
+      try { tokens = JSON.parse(m.clobTokenIds); } catch {}
+
+      if (tokens.length < 2) continue;
+
+      const upIdx = outcomes.findIndex(o => o.toLowerCase() === "up");
+      const downIdx = outcomes.findIndex(o => o.toLowerCase() === "down");
+      if (upIdx < 0 || downIdx < 0) continue;
+
+      const windowEnd = Math.round(new Date(evt.endDate ?? m.endDate).getTime() / 1000);
+      const secsLeft = Math.max(0, windowEnd - now);
+
+      const market: FiveMinMarket = {
+        conditionId: m.conditionId,
+        title: evt.title,
+        upTokenId: tokens[upIdx],
+        downTokenId: tokens[downIdx],
+        upPrice: prices[upIdx] ?? 0.5,
+        downPrice: prices[downIdx] ?? 0.5,
+        windowStart,
+        windowEnd,
+        secondsRemaining: secsLeft,
+        resolved: secsLeft <= 0,
+      };
+
+      fiveMinCache = { market, fetchedAt: Date.now() };
+      return market;
+    } catch (err) {
+      console.error(`fetchCurrent5mMarket error for ${slug}:`, err);
+    }
+  }
+  return null;
+}
+
 /**
  * Fetch CLOB order book for a market token ID.
  */
