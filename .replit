@@ -1,4 +1,4 @@
-modules = ["nodejs-24"]
+modules = ["nodejs-24", "postgresql-16"]
 
 [[artifacts]]
 id = "artifacts/api-server"
@@ -29,3 +29,6 @@ timeoutMs = 20000
 
 [userenv.shared]
 POLYMARKET_PROXY_ADDRESS = "0x2e5FdAeAAC50bb94f8Cdc51206BD574bcDA77dba"
+
+[nix]
+channel = "stable-25_05"

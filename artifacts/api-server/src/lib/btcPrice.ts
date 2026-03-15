@@ -147,16 +147,36 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
 }
 
 /**
- * Estimate true probability for the "BTC higher" contract
- * based on recent 5m and 1h price momentum.
+ * Estimate fair-value probability for a BTC binary contract.
  *
- * - Positive 5m momentum → more likely BTC goes higher
- * - Clamped to [0.20, 0.80] to stay realistic
+ * The market price of the YES token represents the crowd's probability
+ * estimate for the specific binary event (e.g. "BTC > $X by date Y").
+ * We start from that market consensus and adjust based on recent BTC
+ * momentum — if BTC is strongly trending up, the binary probability
+ * should be slightly higher than the market currently implies.
+ *
+ * Calibration:
+ *   - 1% 5m BTC rally  → +5%  relative adjustment to market prob
+ *   - 1% 1h BTC change → +1.5% relative adjustment
+ *   - e.g. market = 4.5¢, BTC +2.5% in 5m → fair value = 4.5¢ × 1.125 = 5.06¢
+ *   - Edge = 5.06¢ − 4.5¢ = 0.56¢ (1.25% edge → triggers buy)
+ *
+ * @param marketYesPrice current Polymarket YES token price (0–1). If omitted,
+ *   falls back to 0.5 (test mode / unavailable market).
  */
-export function estimateTrueProb(btcData: BtcPriceData): number {
+export function estimateTrueProb(
+  btcData: BtcPriceData,
+  marketYesPrice: number = 0.5,
+): number {
   const { change5m, change1h } = btcData;
-  let prob = 0.5;
-  prob += change5m * 0.04;  // 5m momentum (primary signal)
-  prob += change1h * 0.015; // 1h trend (secondary signal)
-  return Math.min(0.80, Math.max(0.20, prob));
+
+  // Relative momentum factor: fraction by which we adjust the market prob.
+  // change5m is in % (e.g. 2.0 = 2%). We scale so that a 2% 5m move
+  // creates a 10% relative adjustment to the implied probability.
+  const momentumFactor = change5m * 0.05 + change1h * 0.015;
+
+  const prob = marketYesPrice * (1 + momentumFactor);
+
+  // Keep probability inside a sensible range
+  return Math.min(0.95, Math.max(0.005, prob));
 }

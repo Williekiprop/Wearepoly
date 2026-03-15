@@ -16,7 +16,7 @@ export const botStateTable = pgTable("bot_state", {
   currentMarketPrice: real("current_market_price"),
   lastSignal: text("last_signal"),
   kellyFraction: real("kelly_fraction").notNull().default(0.25),
-  minEdgeThreshold: real("min_edge_threshold").notNull().default(0.03),
+  minEdgeThreshold: real("min_edge_threshold").notNull().default(0.003),
   sizingMode: text("sizing_mode", { enum: ["flat", "kelly"] }).notNull().default("kelly"),
   flatSizeUsdc: real("flat_size_usdc").notNull().default(1.0),
   lastUpdated: timestamp("last_updated", { withTimezone: true }).notNull().defaultNow(),

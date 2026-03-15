@@ -702,8 +702,16 @@ export default function Dashboard() {
               <TerminalCardTitle><Activity className="w-4 h-4"/> Live Target Signal</TerminalCardTitle>
               {isRunning && <span className="flex h-2 w-2 relative"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span></span>}
             </TerminalCardHeader>
-            <TerminalCardContent className="p-6 flex flex-col items-center justify-center text-center space-y-6">
+            <TerminalCardContent className="p-6 flex flex-col items-center justify-center text-center space-y-4">
               
+              {/* Market question */}
+              {marketData?.marketTitle && (
+                <div className="w-full text-left px-3 py-2 bg-secondary/20 rounded-lg border border-border/30">
+                  <div className="text-[9px] text-muted-foreground uppercase font-bold mb-1">Trading Market</div>
+                  <div className="text-xs font-mono text-foreground/80 leading-snug">{marketData.marketTitle}</div>
+                </div>
+              )}
+
               <AnimatePresence mode="wait">
                 <motion.div 
                   key={marketData?.signal || 'NONE'}
@@ -711,29 +719,45 @@ export default function Dashboard() {
                   animate={{ scale: 1, opacity: 1 }}
                   exit={{ scale: 0.8, opacity: 0 }}
                   className={cn(
-                    "px-8 py-6 rounded-2xl border-2 w-full",
+                    "px-6 py-5 rounded-2xl border-2 w-full",
                     marketData?.signal === 'BUY_YES' ? "bg-success/10 border-success text-success box-glow-primary" :
                     marketData?.signal === 'BUY_NO' ? "bg-destructive/10 border-destructive text-destructive box-glow-destructive" :
                     "bg-secondary/50 border-border text-muted-foreground"
                   )}
                 >
-                  <div className="text-sm font-bold tracking-widest uppercase mb-2 opacity-80">Action Directive</div>
-                  <div className="text-4xl font-black tracking-tight font-mono">
+                  <div className="text-[10px] font-bold tracking-widest uppercase mb-1 opacity-80">Action Directive</div>
+                  <div className="text-3xl font-black tracking-tight font-mono">
                     {marketData?.signal ? marketData.signal.replace('_', ' ') : 'NO TRADE'}
                   </div>
+                  {marketData?.signal === 'NO_TRADE' && (
+                    <div className="text-[10px] mt-2 opacity-70 leading-relaxed">
+                      {(() => {
+                        const mktPrice = marketData?.currentPrice ?? 0.0455;
+                        const needed5m = (0.003 / (mktPrice * 0.05));
+                        return `Need BTC ${needed5m >= 0 ? "+" : ""}${needed5m.toFixed(1)}% in 5m to trigger`;
+                      })()}
+                    </div>
+                  )}
+                  {(marketData?.signal === 'BUY_YES' || marketData?.signal === 'BUY_NO') && (
+                    <div className="text-[10px] mt-2 opacity-70">
+                      Edge: {formatPct(marketData?.edge)} · Hold until +10% or 30 min
+                    </div>
+                  )}
                 </motion.div>
               </AnimatePresence>
 
-              <div className="grid grid-cols-2 gap-4 w-full">
-                <div className="p-4 bg-secondary/30 rounded-lg border border-border/50 text-left">
-                  <div className="text-[10px] text-muted-foreground uppercase font-bold mb-1">True Prob (Est)</div>
-                  <div className="text-xl font-mono text-foreground">{formatPct(marketData?.estimatedTrueProb)}</div>
+              <div className="grid grid-cols-2 gap-3 w-full">
+                <div className="p-3 bg-secondary/30 rounded-lg border border-border/50 text-left">
+                  <div className="text-[9px] text-muted-foreground uppercase font-bold mb-1">Model Prob</div>
+                  <div className="text-lg font-mono text-foreground">{formatPct(marketData?.estimatedTrueProb)}</div>
+                  <div className="text-[9px] text-muted-foreground">market: {formatPct(marketData?.currentPrice)}</div>
                 </div>
-                <div className="p-4 bg-secondary/30 rounded-lg border border-border/50 text-left">
-                  <div className="text-[10px] text-muted-foreground uppercase font-bold mb-1">Market Edge</div>
-                  <div className={cn("text-xl font-mono", (marketData?.edge || 0) > 0.05 ? "text-success text-glow-success" : "text-foreground")}>
-                    {formatPct(marketData?.edge)}
+                <div className="p-3 bg-secondary/30 rounded-lg border border-border/50 text-left">
+                  <div className="text-[9px] text-muted-foreground uppercase font-bold mb-1">Momentum Edge</div>
+                  <div className={cn("text-lg font-mono", (marketData?.edge || 0) >= 0.003 ? "text-success text-glow-success" : "text-muted-foreground")}>
+                    {(marketData?.edge ?? 0) >= 0 ? "+" : ""}{formatPct(marketData?.edge)}
                   </div>
+                  <div className="text-[9px] text-muted-foreground">threshold: 0.30%</div>
                 </div>
               </div>
             </TerminalCardContent>

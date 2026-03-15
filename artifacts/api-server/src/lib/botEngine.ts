@@ -196,7 +196,7 @@ async function ensureBotState() {
       currentMarketPrice: undefined,
       lastSignal: undefined,
       kellyFraction: 0.25,
-      minEdgeThreshold: 0.03,
+      minEdgeThreshold: 0.003,
       sizingMode: "flat",
       flatSizeUsdc: 1.0,
     });
@@ -355,7 +355,7 @@ async function runBotCycle(botId: number) {
         ? polyData.yesPrice
         : 0.5;
     const marketId = polyData.market?.conditionId ?? "btc-sim-market";
-    const trueProb = estimateTrueProb(btcData);
+    const trueProb = estimateTrueProb(btcData, marketYesPrice);
     const edge = trueProb - marketYesPrice;
     const evPerShare = trueProb * (1 - marketYesPrice) - (1 - trueProb) * marketYesPrice;
 
@@ -409,6 +409,16 @@ async function runBotCycle(botId: number) {
           shares *= 0.5;
         }
       }
+    }
+
+    // Always log signal + edge so the user can see what the model is seeing
+    const edgePct = (edge * 100).toFixed(2);
+    const mktPct  = (marketYesPrice * 100).toFixed(2);
+    const truPct  = (trueProb * 100).toFixed(2);
+    if (signal === "NO_TRADE") {
+      console.log(`[MODEL] NO_TRADE | market=${mktPct}¢ trueProb=${truPct}¢ edge=${edgePct}% (threshold±${(freshState.minEdgeThreshold*100).toFixed(1)}%)`);
+    } else {
+      console.log(`[MODEL] ${signal} | market=${mktPct}¢ trueProb=${truPct}¢ edge=+${edgePct}% size=$${positionSize.toFixed(2)}`);
     }
 
     await db
@@ -582,7 +592,7 @@ async function forceCloseOpenTestPositions(botId: number) {
     getBtcPriceData().catch(() => null),
   ]);
   const currentYesPrice = polyData?.yesPrice ?? 0.5;
-  const currentTrueProb = btcData ? estimateTrueProb(btcData) : 0.5;
+  const currentTrueProb = btcData ? estimateTrueProb(btcData, currentYesPrice) : currentYesPrice;
   await closeMaturedTestPositions(botId, state, currentYesPrice, currentTrueProb);
 }
 
@@ -599,22 +609,52 @@ async function closeMatureLivePositions(
     .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "live")));
 
   const now = Date.now();
-  const holdMs = LIVE_HOLD_CYCLES * 30_000;
+  // Exit triggers (all time-based minimums; price-based targets take priority)
+  const MIN_HOLD_MS  = LIVE_HOLD_CYCLES * 30_000;    // 2 min: never exit before this
+  const MAX_HOLD_MS  = 30 * 60_000;                  // 30 min: always exit by this point
+  const PROFIT_TARGET = 0.10;   // +10% price move from entry → take profit
+  const STOP_LOSS     = -0.20;  // -20% price move from entry → cut loss
 
   for (const pos of openLive) {
     const age = now - pos.timestamp.getTime();
-    if (age < holdMs) continue;                       // not mature yet
     if (pendingSellTradeIds.has(pos.id)) continue;    // already queued
+
     if (pos.shares < 0.1) {
-      // "live" (un-matched) order — tokens not yet in wallet; cancel in DB instead of selling
+      // "live" (un-matched) order — tokens not in wallet; cancel instead of selling
       await db.update(tradesTable).set({ status: "cancelled", resolvedAt: new Date() }).where(eq(tradesTable.id, pos.id));
-      console.log(`[LIVE] Trade #${pos.id} had 0 shares (unmatched order), marking cancelled`);
+      console.log(`[LIVE] Trade #${pos.id} had 0 shares (unmatched), marking cancelled`);
       continue;
     }
 
-    // Determine sell price: the token we hold (YES → sell YES at currentYesPrice)
-    const sellPrice = pos.direction === "YES" ? currentYesPrice : 1 - currentYesPrice;
-    const entryPrice = pos.direction === "YES" ? pos.marketPrice : 1 - pos.marketPrice;
+    // Determine current sell price vs entry price
+    const sellPrice  = pos.direction === "YES" ? currentYesPrice : 1 - currentYesPrice;
+    const entryPrice = pos.direction === "YES" ? pos.marketPrice  : 1 - pos.marketPrice;
+    const priceChange = entryPrice > 0 ? (sellPrice - entryPrice) / entryPrice : 0;
+
+    // Evaluate exit conditions
+    const hitMinHold    = age >= MIN_HOLD_MS;
+    const hitMaxHold    = age >= MAX_HOLD_MS;
+    const hitProfitTgt  = hitMinHold && priceChange >= PROFIT_TARGET;
+    const hitStopLoss   = hitMinHold && priceChange <= STOP_LOSS;
+
+    if (!hitProfitTgt && !hitStopLoss && !hitMaxHold) {
+      // Not ready to exit — log current status every cycle for visibility
+      const pctChange = (priceChange * 100).toFixed(1);
+      const pctTarget = (PROFIT_TARGET * 100).toFixed(0);
+      console.log(
+        `[LIVE] Holding trade #${pos.id} | age ${Math.round(age/1000)}s` +
+        ` | entry ${(entryPrice*100).toFixed(2)}¢ → now ${(sellPrice*100).toFixed(2)}¢` +
+        ` (${priceChange >= 0 ? "+" : ""}${pctChange}%) | target ≥+${pctTarget}%`
+      );
+      continue;
+    }
+
+    const exitReason = hitProfitTgt ? "PROFIT_TARGET" : hitStopLoss ? "STOP_LOSS" : "MAX_HOLD";
+    console.log(
+      `[LIVE] Exiting trade #${pos.id} — ${exitReason}` +
+      ` | price ${(entryPrice*100).toFixed(2)}¢ → ${(sellPrice*100).toFixed(2)}¢` +
+      ` (${priceChange >= 0 ? "+" : ""}${(priceChange*100).toFixed(1)}%)`
+    );
 
     if (!conditionId) {
       console.warn("[LIVE] Cannot close position — no conditionId available");
@@ -792,10 +832,10 @@ export async function getMarketAnalysis() {
   const state = await ensureBotState();
   const [btcData, polyData] = await Promise.all([getBtcPriceData(), getBestBtcMarketPrice()]);
 
-  const trueProb = estimateTrueProb(btcData);
   const marketYesPrice =
     polyData.connected && polyData.yesPrice > 0.01 && polyData.yesPrice < 0.99
       ? polyData.yesPrice : 0.5;
+  const trueProb = estimateTrueProb(btcData, marketYesPrice);
 
   const edge = trueProb - marketYesPrice;
   const evPerShare = trueProb * (1 - marketYesPrice) - (1 - trueProb) * marketYesPrice;
