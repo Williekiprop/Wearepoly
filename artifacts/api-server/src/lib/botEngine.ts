@@ -470,12 +470,13 @@ async function runBotCycle(botId: number) {
     const probUpPct = (probUp * 100).toFixed(1);
     const edgePct  = (edge * 100).toFixed(2);
     const secStr   = market5m.secondsRemaining > 0 ? `${market5m.secondsRemaining}s left` : "RESOLVED";
+    const chg1m    = btcData.change1m >= 0 ? `+${btcData.change1m.toFixed(3)}%` : `${btcData.change1m.toFixed(3)}%`;
     if (signal === "NO_TRADE") {
       const reason = tooLate ? "TOO_LATE" : `edge ${edgePct}% < threshold ${(freshState.minEdgeThreshold*100).toFixed(1)}%`;
-      console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% | ${reason} | ${secStr}`);
+      console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} | ${reason} | ${secStr}`);
     } else {
       const dir = isBuyUp ? "BUY_UP" : "BUY_DOWN";
-      console.log(`[5M] ${dir} | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% edge=+${edgePct}% size=$${positionSize.toFixed(2)} | ${secStr}`);
+      console.log(`[5M] ${dir} | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} edge=+${edgePct}% size=$${positionSize.toFixed(2)} | ${secStr}`);
     }
 
     await db
@@ -1111,6 +1112,7 @@ export async function getMarketAnalysis() {
     qYes: 0, qNo: 0,
     // BTC
     btcCurrentPrice: btcData.currentPrice,
+    btcPriceChange1m: btcData.change1m,
     btcPriceChange5m: btcData.change5m,
     btcPriceChange1h: btcData.change1h,
     // Model

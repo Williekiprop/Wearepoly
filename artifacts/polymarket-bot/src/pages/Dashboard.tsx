@@ -313,7 +313,12 @@ export default function Dashboard() {
             <div className="flex items-baseline gap-2">
               <span className="text-lg font-mono font-bold">{formatCurrency(btcData?.currentPrice)}</span>
               <span className={cn("text-xs font-mono font-medium", 
-                (btcData?.change5m || 0) >= 0 ? "text-success" : "text-destructive"
+                ((btcData as any)?.change1m || 0) >= 0 ? "text-success" : "text-destructive"
+              )}>
+                {formatBtcPct((btcData as any)?.change1m)} (1m)
+              </span>
+              <span className={cn("text-[10px] font-mono", 
+                (btcData?.change5m || 0) >= 0 ? "text-success/60" : "text-destructive/60"
               )}>
                 {formatBtcPct(btcData?.change5m)} (5m)
               </span>

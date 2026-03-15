@@ -14,6 +14,7 @@ export interface BtcCandle {
 
 export interface BtcPriceData {
   currentPrice: number;
+  change1m: number;
   change5m: number;
   change1h: number;
   change24h: number;
@@ -107,6 +108,14 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
       ? ((currentPrice - openPrice24h) / openPrice24h) * 100
       : 0;
 
+    // 1m change: compare current vs 1 candle back (the previous closed candle)
+    const price1mAgo = candles.length >= 2
+      ? candles[candles.length - 2].close
+      : currentPrice;
+    const change1m = price1mAgo > 0
+      ? ((currentPrice - price1mAgo) / price1mAgo) * 100
+      : 0;
+
     // 5m change: compare current vs 5 candles back (5 × 1-min = 5 min)
     const price5mAgo = candles.length >= 6
       ? candles[candles.length - 6].close
@@ -123,6 +132,7 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
 
     const data: BtcPriceData = {
       currentPrice,
+      change1m,
       change5m,
       change1h,
       change24h,
@@ -137,6 +147,7 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
     if (cache) return cache.data;
     return {
       currentPrice: 0,
+      change1m: 0,
       change5m: 0,
       change1h: 0,
       change24h: 0,
@@ -150,21 +161,24 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
  * Estimate true probability that BTC goes UP in the next 5-minute window.
  *
  * Used for the rolling btc-updown-5m markets on Polymarket.
- * Strategy: mean-reversion + momentum blend.
+ * Strategy: momentum blend using multiple timeframes.
  *   - Base probability is 50% (coin flip when flat)
- *   - Recent BTC momentum shifts the estimate away from 50%
- *   - 5m change of +1% → prob_up rises by +15% (momentum follows through)
- *   - 1h change of +1% → prob_up rises by +3% (longer-term trend)
+ *   - 1m change is the PRIMARY signal — very recent momentum not yet priced in
+ *     +0.1% in last minute → +3% probability shift
+ *   - 5m change is a secondary trend confirmation (mild weight, already priced in)
+ *     +1% over 5m → +5% probability shift
+ *   - 1h change gives broader trend context
+ *     +1% over 1h → +2% probability shift
  *
- * Example: BTC flat (change5m≈0) and market prices UP at 78.5%
- *   → our model says ~50%, market overprices UP → edge to BUY DOWN
+ * Example: BTC ticks up 0.15% in the last minute, market prices UP at 50%
+ *   → model says 54.5%, market underprices UP → edge to BUY UP
  *
- * Example: BTC +1.5% in 5m and market prices UP at 40%
- *   → our model says 72.5%, market underprices UP → edge to BUY UP
+ * Example: BTC drops 0.2% in last minute, market prices DOWN at 50%
+ *   → model says 44%, market underprices DOWN → edge to BUY DOWN
  */
 export function estimate5mUpProb(btcData: BtcPriceData): number {
-  const { change5m, change1h } = btcData;
-  const momentum = change5m * 0.15 + change1h * 0.03;
+  const { change1m, change5m, change1h } = btcData;
+  const momentum = change1m * 0.30 + change5m * 0.05 + change1h * 0.02;
   return Math.min(0.95, Math.max(0.05, 0.5 + momentum));
 }
 
