@@ -74,27 +74,31 @@ function buildHmacSignature(
   const normalized = secret.replace(/-/g, "+").replace(/_/g, "/");
   const secretBuffer = Buffer.from(normalized, "base64");
   const sig = crypto.createHmac("sha256", secretBuffer).update(message).digest("base64");
-  // Polymarket requires URL-safe base64 output for POLY-SIGNATURE
+  // Polymarket requires URL-safe base64 output for POLY_SIGNATURE
   return sig.replace(/\+/g, "-").replace(/\//g, "_");
 }
 
-function buildApiHeaders(
+async function buildApiHeaders(
   method: string,
   path: string,
   body: string = ""
-): Record<string, string> {
+): Promise<Record<string, string>> {
   const key = process.env.POLYMARKET_API_KEY ?? "";
   const secret = process.env.POLYMARKET_API_SECRET ?? "";
   const passphrase = process.env.POLYMARKET_API_PASSPHRASE ?? "";
   const timestamp = Math.floor(Date.now() / 1000);
   const signature = buildHmacSignature(secret, method, path, timestamp, body);
 
+  const wallet = getWallet();
+  const address = await wallet.getAddress();
+
   return {
     "Content-Type": "application/json",
-    "POLY-API-KEY": key,
-    "POLY-PASSPHRASE": passphrase,
-    "POLY-TIMESTAMP": String(timestamp),
-    "POLY-SIGNATURE": signature,
+    "POLY_ADDRESS": address,
+    "POLY_API_KEY": key,
+    "POLY_PASSPHRASE": passphrase,
+    "POLY_TIMESTAMP": String(timestamp),
+    "POLY_SIGNATURE": signature,
   };
 }
 
@@ -162,7 +166,7 @@ export async function getClobTokenId(
 ): Promise<string | null> {
   try {
     const path = `/markets/${conditionId}`;
-    const headers = buildApiHeaders("GET", path);
+    const headers = await buildApiHeaders("GET", path);
     const res = await polyFetch(`${CLOB_API}${path}`, {
       headers,
       signal: AbortSignal.timeout(8000),
@@ -201,7 +205,7 @@ export async function placeOrder(params: PlaceOrderParams): Promise<OrderResult>
     });
 
     const path = "/order";
-    const headers = buildApiHeaders("POST", path, body);
+    const headers = await buildApiHeaders("POST", path, body);
 
     const res = await polyFetch(`${CLOB_API}${path}`, {
       method: "POST",
@@ -244,7 +248,7 @@ export async function cancelOrder(orderId: string): Promise<boolean> {
   try {
     const body = JSON.stringify({ orderID: orderId });
     const path = "/order";
-    const headers = buildApiHeaders("DELETE", path, body);
+    const headers = await buildApiHeaders("DELETE", path, body);
 
     const res = await polyFetch(`${CLOB_API}${path}`, {
       method: "DELETE",
@@ -266,9 +270,9 @@ export async function getWalletBalance(): Promise<number | null> {
   try {
     const wallet = getWallet();
     const path = `/balance-allowance?asset_type=USDC&signature_type=0`;
-    const headers = buildApiHeaders("GET", path);
+    const headers = await buildApiHeaders("GET", path);
     const res = await polyFetch(`${CLOB_API}${path}`, {
-      headers: { ...headers, "POLY-ADDRESS": wallet.address },
+      headers,
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return null;
