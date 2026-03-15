@@ -274,7 +274,7 @@ export async function startBot(opts: {
       currentMarketPrice: undefined,
       lastSignal: opts.mode === "live" ? "LIVE MODE — Connecting..." : "Paper trading on live feed...",
       kellyFraction: opts.kellyFraction ?? 0.25,
-      minEdgeThreshold: opts.minEdgeThreshold ?? 0.01,
+      minEdgeThreshold: opts.minEdgeThreshold ?? 0.001,
       sizingMode,
       flatSizeUsdc,
       lastUpdated: new Date(),

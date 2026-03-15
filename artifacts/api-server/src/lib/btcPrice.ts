@@ -178,7 +178,13 @@ export async function getBtcPriceData(): Promise<BtcPriceData> {
  */
 export function estimate5mUpProb(btcData: BtcPriceData): number {
   const { change1m, change5m, change1h } = btcData;
-  const momentum = change1m * 0.30 + change5m * 0.05 + change1h * 0.02;
+  // Primary: 1m momentum — most predictive for next 5m window
+  //   +0.1% BTC tick in last minute → +6% probability shift (enough to trade)
+  // Secondary: 5m direction — broader trend still in play
+  //   +1% over 5m → +5% shift (mild weight, partially priced in)
+  // Tertiary: 1h trend — directional context
+  //   +1% over 1h → +2% shift
+  const momentum = change1m * 0.60 + change5m * 0.05 + change1h * 0.02;
   return Math.min(0.95, Math.max(0.05, 0.5 + momentum));
 }
 
