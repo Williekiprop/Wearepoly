@@ -51,10 +51,11 @@ const ORDER_TYPES = {
 };
 
 export interface PlaceOrderParams {
-  tokenId: string;       // CLOB token ID for the YES or NO outcome
+  tokenId: string;        // CLOB token ID for the YES or NO outcome
   side: "BUY" | "SELL";
-  price: number;         // 0.0 to 1.0
-  sizeUsdc: number;      // USDC amount to spend
+  price: number;          // 0.0 to 1.0
+  sizeUsdc: number;       // USDC amount to spend (BUY) or expected to receive (SELL)
+  sizeTokens?: number;    // SELL only: exact number of tokens to sell (overrides sizeUsdc for amount calc)
 }
 
 export interface OrderResult {
@@ -236,22 +237,36 @@ async function buildSignedOrder(
     console.log(`[ORDER] Price snapped ${params.price} → ${price} (tick grid 0.001)`);
   }
 
-  // Polymarket CLOB amount precision rules (BUY side):
-  //   takerAmount (tokens out): max 2 decimal places in token denomination
-  //     → must be divisible by 10,000 micro-tokens (since 1 token = 1e6 micro-tokens)
-  //   makerAmount (USDC in): MUST equal round(price × takerAmount_in_tokens, 5 dp)
-  //     → CLOB independently validates: makerAmount == price × takerAmount
+  // Polymarket CLOB amount precision rules:
   //
-  // Derivation order: takerAmount first → makerAmount derived from it.
+  // BUY:  maker = USDC in,   taker = tokens out
+  //   takerAmount (tokens): rounded UP to 2 decimal places → divisible by 10,000 micro-tokens
+  //   makerAmount (USDC):   MUST equal round(price × takerTokens, 5 dp) — CLOB validates this
+  //
+  // SELL: maker = tokens in, taker = USDC out
+  //   makerAmount (tokens): exact shares held, rounded to 2 decimal places in token denomination
+  //   takerAmount (USDC):   MUST equal round(price × makerTokens, 5 dp) — same CLOB validation
+  //
+  // Derivation always: fix the token side first, derive the USDC side from it.
 
-  // Step 1: tokens to receive, rounded UP to 2 decimal places in token denomination
-  const takerTokens = Math.ceil((sizeUsdc / price) * 100) / 100; // e.g., 21.74
-  const takerAmount = Math.round(takerTokens * 1e6); // micro-tokens, divisible by 10,000
+  let makerAmount: number;
+  let takerAmount: number;
 
-  // Step 2: USDC to spend = price × takerTokens, rounded to 5 decimal places
-  // CLOB validates this formula, so we must match it exactly.
-  const makerUsdc = Math.round(price * takerTokens * 1e5) / 1e5; // e.g., 1.00004
-  const makerAmount = Math.round(makerUsdc * 1e6); // micro-USDC, divisible by 10
+  if (side === "BUY") {
+    // BUY: pay USDC (maker), receive tokens (taker)
+    const takerTokens = Math.ceil((sizeUsdc / price) * 100) / 100; // tokens out, 2dp
+    takerAmount = Math.round(takerTokens * 1e6);
+    const makerUsdc = Math.round(price * takerTokens * 1e5) / 1e5;
+    makerAmount = Math.round(makerUsdc * 1e6);
+  } else {
+    // SELL: give tokens (maker), receive USDC (taker)
+    // sizeTokens is the exact share count; fall back to sizeUsdc/price if not given
+    const rawTokens = params.sizeTokens ?? (sizeUsdc / price);
+    const makerTokens = Math.floor(rawTokens * 100) / 100; // tokens in, 2dp (floor to avoid over-sell)
+    makerAmount = Math.round(makerTokens * 1e6);
+    const takerUsdc = Math.round(price * makerTokens * 1e5) / 1e5;
+    takerAmount = Math.round(takerUsdc * 1e6);
+  }
 
   const salt = BigInt(Math.floor(Math.random() * 1e15));
   // GTC orders MUST have expiration = 0 (only GTD orders use a timestamp).

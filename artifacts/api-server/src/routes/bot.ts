@@ -159,13 +159,15 @@ router.get("/bot/pending-order", (_req, res): void => {
 });
 
 router.post("/bot/complete-order", async (req, res): Promise<void> => {
-  const { orderId, success, errorMessage, context } = req.body as {
+  const { orderId, success, errorMessage, context, actualShares, clobStatus } = req.body as {
     orderId?: string;
     success: boolean;
     errorMessage?: string;
     context: Parameters<typeof completeBrowserOrder>[3];
+    actualShares?: number; // actual tokens received/sent as reported by CLOB
+    clobStatus?: string;   // "matched" = settled on-chain; "live" = open in order book
   };
-  await completeBrowserOrder(orderId, success, errorMessage, context);
+  await completeBrowserOrder(orderId, success, errorMessage, context, actualShares, clobStatus);
   res.json({ ok: true });
 });
 

@@ -49,6 +49,8 @@ export function useBrowserOrderRelay(isLive: boolean) {
     let orderId: string | undefined;
     let success = false;
     let errorMessage: string | undefined;
+    let actualShares: number | undefined; // actual tokens received from CLOB fill
+    let clobStatus: string | undefined;   // "matched" = on-chain settled, "live" = still in order book
 
     try {
       // POST directly to Polymarket from this browser (VPN-connected machine)
@@ -61,13 +63,16 @@ export function useBrowserOrderRelay(isLive: boolean) {
         body: data.pending.body,
       });
       const polyText = await polyRes.text();
-      let polyJson: { orderID?: string; error?: string; errorMsg?: string } = {};
+      let polyJson: { orderID?: string; error?: string; errorMsg?: string; takingAmount?: string; makingAmount?: string; status?: string } = {};
       try { polyJson = JSON.parse(polyText); } catch { /* non-JSON */ }
 
       console.log("[RELAY] Polymarket response:", polyRes.status, polyText.slice(0, 500));
       if (polyRes.ok && polyJson.orderID) {
         orderId = polyJson.orderID;
         success = true;
+        // takingAmount = actual tokens received (BUY) or USDC received (SELL) from this fill cycle
+        if (polyJson.takingAmount) actualShares = parseFloat(polyJson.takingAmount);
+        clobStatus = polyJson.status; // "matched" = settled on-chain; "live" = still in order book
         setRelayStatus({ state: "success", orderId });
         setTimeout(() => setRelayStatus({ state: "idle" }), 4000);
       } else {
@@ -83,11 +88,11 @@ export function useBrowserOrderRelay(isLive: boolean) {
       setTimeout(() => setRelayStatus({ state: "idle" }), 6000);
     }
 
-    // Report result back to server
+    // Report result back to server (include actual fill amounts and CLOB status)
     await fetch(`${API_BASE}/bot/complete-order`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId, success, errorMessage, context: data.pending.context }),
+      body: JSON.stringify({ orderId, success, errorMessage, context: data.pending.context, actualShares, clobStatus }),
     }).catch(() => null);
 
     queryClient.invalidateQueries({ queryKey: getGetBotStatusQueryKey() });

@@ -33,6 +33,10 @@ interface PendingBrowserOrder {
   prepared: PreparedBrowserOrder;
   botId: number;
   tradeContext: {
+    orderSide: "BUY" | "SELL";    // distinguishes entry vs exit orders
+    tradeId?: number;              // SELL only: tradesTable row ID to close on confirm
+    tokenId?: string;              // token being traded (for display/future use)
+    entryPrice?: number;           // SELL only: original entry price per share (for PnL)
     direction: "YES" | "NO";
     marketPrice: number;
     estimatedProb: number;
@@ -46,6 +50,10 @@ interface PendingBrowserOrder {
   };
   queuedAt: number;
 }
+
+// Track which open live trade IDs already have a SELL order queued/submitted
+// so we never double-close the same position.
+const pendingSellTradeIds = new Set<number>();
 
 const browserOrderQueue: PendingBrowserOrder[] = [];
 
@@ -64,31 +72,90 @@ export async function completeBrowserOrder(
   orderId: string | undefined,
   success: boolean,
   errorMessage: string | undefined,
-  ctx: PendingBrowserOrder["tradeContext"] & { botId: number }
+  ctx: PendingBrowserOrder["tradeContext"] & { botId: number },
+  actualShares?: number, // exact tokens received/given as reported by CLOB (overrides estimate)
+  clobStatus?: string,   // "matched" = settled on-chain with tokens; "live" = order still in book
 ): Promise<void> {
-  const { botId, direction, marketPrice, estimatedProb, edge, kellyScaledPct,
-    positionSize, shares, priceImpact, btcPrice, marketId } = ctx;
+  const { botId, orderSide, tradeId, entryPrice, direction, marketPrice, estimatedProb, edge, kellyScaledPct,
+    positionSize, shares: estimatedShares, priceImpact, btcPrice, marketId } = ctx;
+
+  // For BUY: use actual tokens received from CLOB; 0 if order is still "live" in book (not matched yet)
+  // For SELL: actualShares from CLOB is USDC received; use estimatedShares for PnL calculation
+  const isMatched = !clobStatus || clobStatus === "matched"; // default to matched if unknown
+  const shares = orderSide === "BUY"
+    ? (isMatched ? (actualShares ?? estimatedShares) : (actualShares ?? 0))
+    : estimatedShares;
 
   if (success && orderId) {
-    await db.insert(tradesTable).values({
-      direction, marketPrice, estimatedProb, edge,
-      kellyFraction: kellyScaledPct, positionSize, shares, priceImpact,
-      exitPrice: null, pnl: null, status: "open",
-      btcPriceAtEntry: btcPrice,
-      marketId: `${marketId}::${orderId}`,
-      resolvedAt: null, mode: "live",
-    });
-    const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
-    if (state) {
-      await db.update(botStateTable).set({
-        balance: state.balance - positionSize,
-        totalTrades: state.totalTrades + 1,
-        lastSignal: `LIVE ${direction} — $${positionSize.toFixed(2)} placed`,
-        lastUpdated: new Date(),
-      }).where(eq(botStateTable.id, botId));
+    if (orderSide === "SELL" && tradeId != null) {
+      // ── SELL confirmed: close the position, record PnL, refill balance from chain ──
+      pendingSellTradeIds.delete(tradeId);
+      const exitPrice = marketPrice; // price at which we sold
+      const entryPriceUsed = entryPrice ?? exitPrice;
+      const pnl = shares * (exitPrice - entryPriceUsed);
+      const won = pnl > 0;
+
+      await db.update(tradesTable).set({
+        status: "closed",
+        exitPrice,
+        pnl,
+        resolvedAt: new Date(),
+      }).where(eq(tradesTable.id, tradeId));
+
+      // Refetch real wallet balance so any on-chain profit flows back into bot budget
+      const walletBalance = await getWalletBalance();
+      const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+      if (state) {
+        const newBalance = walletBalance !== null && walletBalance > 0 ? walletBalance : state.balance + positionSize + pnl;
+        await db.update(botStateTable).set({
+          balance: newBalance,
+          totalTrades: state.totalTrades + 1,
+          winningTrades: won ? state.winningTrades + 1 : state.winningTrades,
+          losingTrades: won ? state.losingTrades : state.losingTrades + 1,
+          totalPnl: state.totalPnl + pnl,
+          lastSignal: `LIVE SELL ${direction} — P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)} | wallet $${newBalance.toFixed(2)}`,
+          lastUpdated: new Date(),
+        }).where(eq(botStateTable.id, botId));
+      }
+      console.log(`[LIVE/BROWSER] SELL confirmed ${orderId} | P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)} | wallet: $${walletBalance?.toFixed(2) ?? "?"}`);
+    } else {
+      // ── BUY confirmed: open new position row, deduct balance ──
+      await db.insert(tradesTable).values({
+        direction, marketPrice, estimatedProb, edge,
+        kellyFraction: kellyScaledPct, positionSize, shares, priceImpact,
+        exitPrice: null, pnl: null, status: "open",
+        btcPriceAtEntry: btcPrice,
+        marketId: `${marketId}::${orderId}`,
+        resolvedAt: null, mode: "live",
+      });
+      const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+      if (state) {
+        await db.update(botStateTable).set({
+          balance: state.balance - positionSize,
+          totalTrades: state.totalTrades + 1,
+          lastSignal: `LIVE BUY ${direction} — $${positionSize.toFixed(2)} placed`,
+          lastUpdated: new Date(),
+        }).where(eq(botStateTable.id, botId));
+      }
+      console.log(`[LIVE/BROWSER] BUY ${isMatched ? "MATCHED" : "LIVE(pending)"}: ${orderId} | shares=${shares.toFixed(2)} | balance deducted $${positionSize.toFixed(4)}`);
     }
-    console.log(`[LIVE/BROWSER] Order placed OK: ${orderId}`);
   } else {
+    if (orderSide === "SELL" && tradeId != null) {
+      pendingSellTradeIds.delete(tradeId);
+      // If SELL fails due to insufficient balance (tokens not in wallet), cancel the position
+      // rather than retrying forever. This handles "live" (unmatched) orders that never filled.
+      const errLower = (errorMessage ?? "").toLowerCase();
+      if (errLower.includes("not enough balance") || errLower.includes("allowance")) {
+        await db.update(tradesTable).set({ status: "cancelled", resolvedAt: new Date() }).where(eq(tradesTable.id, tradeId));
+        // Refetch wallet balance to sync after failed sell attempt
+        const walletBalance = await getWalletBalance();
+        const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+        if (state && walletBalance !== null && walletBalance > 0) {
+          await db.update(botStateTable).set({ balance: walletBalance, lastUpdated: new Date() }).where(eq(botStateTable.id, botId));
+        }
+        console.warn(`[LIVE/BROWSER] SELL failed (no balance) — trade #${tradeId} cancelled, wallet synced to $${walletBalance?.toFixed(2)}`);
+      }
+    }
     console.error(`[LIVE/BROWSER] Order failed: ${errorMessage}`);
     const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
     if (state) {
@@ -102,6 +169,10 @@ export async function completeBrowserOrder(
 
 // How many 30s cycles to hold a test position before closing at market price
 const TEST_HOLD_CYCLES = 2; // 60 seconds
+
+// How many 30s cycles to hold a LIVE position before selling back to market
+// 4 cycles = 2 minutes.  Gives edge time to realise without tying up capital forever.
+const LIVE_HOLD_CYCLES = 4; // 2 minutes
 
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -293,9 +364,13 @@ async function runBotCycle(botId: number) {
     const entryPrice = isBuyYes ? marketYesPrice : 1 - marketYesPrice;
     const winProb = isBuyYes ? trueProb : 1 - trueProb;
 
-    // ── Step 1: Close any open test positions using model fair value ──
+    // ── Step 1: Manage open positions ──
     if (state.mode === "test") {
+      // Test mode: close matured paper positions (mark-to-model)
       await closeMaturedTestPositions(botId, state, marketYesPrice, trueProb);
+    } else {
+      // Live mode: close matured real positions by queuing SELL orders
+      await closeMatureLivePositions(botId, marketYesPrice, polyData.market?.conditionId ?? null);
     }
 
     // Re-read state after potential balance updates from closures
@@ -344,38 +419,34 @@ async function runBotCycle(botId: number) {
     // Polymarket CLOB minimum order is $1 USDC; skip if Kelly sizing is below that
     if (signal === "NO_TRADE" || positionSize < 1.0 || shares <= 0) return;
 
-    // ── Step 3: Only open one position at a time (test mode) ──
+    // ── Step 3: Open a new position (one at a time) ──
     if (freshState.mode === "test") {
-      const openPositions = await db
-        .select()
-        .from(tradesTable)
+      const openPositions = await db.select().from(tradesTable)
         .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
+      if (openPositions.length > 0) return; // wait for it to close
 
-      if (openPositions.length > 0) {
-        // Already holding a position — wait for it to close
+      await openTestPosition(botId, freshState, {
+        direction, marketPrice: marketYesPrice, edge, evPerShare,
+        kellyScaledPct: positionSize / freshState.balance, positionSize, shares, priceImpact,
+      }, btcData.currentPrice, marketId);
+    } else {
+      // LIVE mode: only buy if no open live positions AND no pending BUY already queued
+      const openLivePositions = await db.select().from(tradesTable)
+        .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "live")));
+      if (openLivePositions.length > 0) {
+        console.log(`[LIVE] Holding — ${openLivePositions.length} open position(s), waiting to close`);
+        return;
+      }
+      // Also skip if there's already a pending BUY in the browser relay queue
+      const hasPendingBuy = browserOrderQueue.some(o => o.botId === botId && o.tradeContext.orderSide === "BUY");
+      if (hasPendingBuy) {
+        console.log("[LIVE] Skipping — BUY already queued, awaiting browser relay");
         return;
       }
 
-      await openTestPosition(botId, freshState, {
-        direction,
-        marketPrice: marketYesPrice,
-        edge,
-        evPerShare,
-        kellyScaledPct: positionSize / freshState.balance,
-        positionSize,
-        shares,
-        priceImpact,
-      }, btcData.currentPrice, marketId);
-    } else {
       await executeLiveTrade(botId, freshState, {
-        direction,
-        marketPrice: marketYesPrice,
-        edge,
-        evPerShare,
-        kellyScaledPct: positionSize / freshState.balance,
-        positionSize,
-        shares,
-        priceImpact,
+        direction, marketPrice: marketYesPrice, edge, evPerShare,
+        kellyScaledPct: positionSize / freshState.balance, positionSize, shares, priceImpact,
       }, btcData.currentPrice, marketId, polyData.market?.conditionId ?? null);
     }
   } catch (err) {
@@ -516,6 +587,95 @@ async function forceCloseOpenTestPositions(botId: number) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// LIVE MODE — Close mature positions by placing SELL orders
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function closeMatureLivePositions(
+  botId: number,
+  currentYesPrice: number,
+  conditionId: string | null,
+): Promise<void> {
+  const openLive = await db.select().from(tradesTable)
+    .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "live")));
+
+  const now = Date.now();
+  const holdMs = LIVE_HOLD_CYCLES * 30_000;
+
+  for (const pos of openLive) {
+    const age = now - pos.timestamp.getTime();
+    if (age < holdMs) continue;                       // not mature yet
+    if (pendingSellTradeIds.has(pos.id)) continue;    // already queued
+    if (pos.shares < 0.1) {
+      // "live" (un-matched) order — tokens not yet in wallet; cancel in DB instead of selling
+      await db.update(tradesTable).set({ status: "cancelled", resolvedAt: new Date() }).where(eq(tradesTable.id, pos.id));
+      console.log(`[LIVE] Trade #${pos.id} had 0 shares (unmatched order), marking cancelled`);
+      continue;
+    }
+
+    // Determine sell price: the token we hold (YES → sell YES at currentYesPrice)
+    const sellPrice = pos.direction === "YES" ? currentYesPrice : 1 - currentYesPrice;
+    const entryPrice = pos.direction === "YES" ? pos.marketPrice : 1 - pos.marketPrice;
+
+    if (!conditionId) {
+      console.warn("[LIVE] Cannot close position — no conditionId available");
+      continue;
+    }
+
+    const tokenId = await getClobTokenId(conditionId, pos.direction);
+    if (!tokenId) {
+      console.error(`[LIVE] Cannot get tokenId for SELL of ${pos.direction}`);
+      continue;
+    }
+
+    // Prepare SELL order using exact shares held
+    try {
+      const prepared = await prepareOrderForBrowser({
+        tokenId,
+        side: "SELL",
+        price: sellPrice,
+        sizeUsdc: pos.shares * sellPrice,
+        sizeTokens: pos.shares,
+      });
+
+      pendingSellTradeIds.add(pos.id);
+      browserOrderQueue.push({
+        prepared,
+        botId,
+        tradeContext: {
+          orderSide: "SELL",
+          tradeId: pos.id,
+          tokenId,
+          entryPrice,
+          direction: pos.direction,
+          marketPrice: currentYesPrice,
+          estimatedProb: currentYesPrice,
+          edge: 0,
+          kellyScaledPct: 0,
+          positionSize: pos.positionSize,
+          shares: pos.shares,
+          priceImpact: 0,
+          btcPrice: 0,
+          marketId: pos.marketId,
+        },
+        queuedAt: Date.now(),
+      });
+
+      const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+      if (state) {
+        await db.update(botStateTable).set({
+          lastSignal: `LIVE SELL ${pos.direction} — closing ${pos.shares.toFixed(2)} shares @ ${(sellPrice * 100).toFixed(1)}¢`,
+          lastUpdated: new Date(),
+        }).where(eq(botStateTable.id, botId));
+      }
+
+      console.log(`[LIVE] Queued SELL for trade #${pos.id}: ${pos.shares.toFixed(2)} ${pos.direction} tokens @ ${(sellPrice * 100).toFixed(1)}¢ (held ${Math.round(age / 1000)}s)`);
+    } catch (err) {
+      console.error(`[LIVE] Failed to prepare SELL for trade #${pos.id}:`, err);
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // LIVE ORDER EXECUTION
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -546,6 +706,7 @@ async function executeLiveTrade(
   const limitPrice = direction === "YES" ? marketPrice : 1 - marketPrice;
   const trueYesProb = Math.min(0.95, Math.max(0.05, marketPrice + edge));
   const tradeCtx = {
+    orderSide: "BUY" as const,
     direction, marketPrice, estimatedProb: trueYesProb, edge,
     kellyScaledPct, positionSize: orderSize, shares, priceImpact, btcPrice, marketId,
   };
