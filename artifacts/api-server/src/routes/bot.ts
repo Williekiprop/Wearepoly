@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { getBotState, startBot, stopBot, resetBot, setSizingMode, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance } from "../lib/botEngine.js";
-import { hasProxy, setProxyUrl, getProxyDisplay, getGeoblockCooldownMs, testProxy, polyFetch } from "../lib/proxiedFetch.js";
+import { hasProxy, setProxyUrl, getProxyDisplay, getGeoblockCooldownMs, resetGeoblockCooldown, testProxy, polyFetch } from "../lib/proxiedFetch.js";
 import { ethers } from "ethers";
 import * as crypto from "crypto";
 
@@ -88,6 +88,16 @@ router.post("/bot/stop", async (_req, res): Promise<void> => {
 router.post("/bot/reset", async (_req, res): Promise<void> => {
   const state = await resetBot();
   res.json(formatState(state));
+});
+
+router.post("/bot/proxy/retry", async (_req, res): Promise<void> => {
+  if (!hasProxy()) {
+    res.status(400).json({ error: "No proxy configured" });
+    return;
+  }
+  resetGeoblockCooldown();
+  const state = await getBotState();
+  res.json({ ...formatState(state), message: "Geoblock cooldown reset — proxy will retry on next bot cycle" });
 });
 
 router.post("/bot/sync-balance", async (_req, res): Promise<void> => {

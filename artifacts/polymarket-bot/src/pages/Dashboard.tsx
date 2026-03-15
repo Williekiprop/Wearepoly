@@ -426,8 +426,19 @@ export default function Dashboard() {
                       </div>
                     ) : (botData as any)?.geoblockCooldownSec > 0 ? (
                       <div className="mt-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg px-3 py-2 text-[10px] font-mono text-yellow-400 leading-relaxed space-y-1">
-                        <div className="font-bold">⏱ Proxy geoblocked — auto-retrying in {Math.ceil((botData as any).geoblockCooldownSec / 60)}m</div>
-                        <div>Proxy URL is preserved. Bot will retry automatically when cooldown expires.</div>
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold">⏱ Proxy geoblocked — cooldown {Math.ceil((botData as any).geoblockCooldownSec / 60)}m left</span>
+                          <button
+                            onClick={async () => {
+                              await fetch(`${import.meta.env.BASE_URL?.replace(/\/$/, "")}/api/bot/proxy/retry`, { method: "POST" });
+                              queryClient.invalidateQueries();
+                            }}
+                            className="ml-2 shrink-0 px-2 py-0.5 rounded bg-yellow-500/20 border border-yellow-500/40 hover:bg-yellow-500/30 text-yellow-300 font-bold text-[9px] transition-colors"
+                          >
+                            ↻ RETRY NOW
+                          </button>
+                        </div>
+                        <div>Switched VPN/proxy to EU? Hit Retry Now to skip the cooldown.</div>
                       </div>
                     ) : (
                     <div className="mt-2 bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2 text-[10px] font-mono text-destructive/90 leading-relaxed space-y-1">

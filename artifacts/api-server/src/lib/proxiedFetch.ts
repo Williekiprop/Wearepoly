@@ -95,6 +95,18 @@ export function markProxyGeoblocked(): void {
   console.warn(`[PROXY] Geoblocked — suspended until ${retryAt} (5 min cooldown)`);
 }
 
+/**
+ * Reset geoblock cooldown immediately — call this when the user's VPN has switched
+ * to a non-blocked region and they want to retry without waiting.
+ * The proxy URL is preserved.
+ */
+export function resetGeoblockCooldown(): void {
+  _geoblockedUntil = 0;
+  _agent = null;
+  _proxyFetch = null;
+  console.log("[PROXY] Geoblock cooldown reset manually — proxy will be retried on next request");
+}
+
 /** Returns a password-masked copy of the URL for logging/display. */
 export function maskUrl(url: string): string {
   return url.replace(/:([^@:]+)@/, ":***@");
@@ -119,9 +131,16 @@ export function getGeoblockCooldownMs(): number {
   return Math.max(0, _geoblockedUntil - Date.now());
 }
 
-/** Returns true if a proxy is configured. */
+/** Returns the raw configured proxy URL regardless of geoblock cooldown. */
+function getRawUrl(): string | null {
+  if (_runtimeUrl !== undefined) return _runtimeUrl ? cleanUrl(_runtimeUrl) : null;
+  const raw = process.env.PROXY_URL ?? null;
+  return raw ? cleanUrl(raw) : null;
+}
+
+/** Returns true if a proxy URL is configured (even if currently in geoblock cooldown). */
 export function hasProxy(): boolean {
-  return Boolean(getActiveUrl());
+  return Boolean(getRawUrl());
 }
 
 /** Returns proxied fetch if proxy is configured, otherwise native fetch. */
