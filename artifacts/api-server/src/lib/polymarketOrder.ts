@@ -236,19 +236,33 @@ async function buildSignedOrder(
     console.log(`[ORDER] Price snapped ${params.price} → ${price} (tick grid 0.001)`);
   }
 
-  // Convert to micro-USDC (6 decimals) and token units (6 decimals)
-  const makerAmount = Math.round(sizeUsdc * 1e6); // USDC in (buy side)
-  // Use floor so the implied price >= limit price (conservative / maker-friendly)
-  const takerAmount = Math.floor((sizeUsdc / price) * 1e6); // tokens out
+  // Polymarket CLOB amount precision rules (BUY side):
+  //   takerAmount (tokens out): max 2 decimal places in token denomination
+  //     → must be divisible by 10,000 micro-tokens (since 1 token = 1e6 micro-tokens)
+  //   makerAmount (USDC in): MUST equal round(price × takerAmount_in_tokens, 5 dp)
+  //     → CLOB independently validates: makerAmount == price × takerAmount
+  //
+  // Derivation order: takerAmount first → makerAmount derived from it.
+
+  // Step 1: tokens to receive, rounded UP to 2 decimal places in token denomination
+  const takerTokens = Math.ceil((sizeUsdc / price) * 100) / 100; // e.g., 21.74
+  const takerAmount = Math.round(takerTokens * 1e6); // micro-tokens, divisible by 10,000
+
+  // Step 2: USDC to spend = price × takerTokens, rounded to 5 decimal places
+  // CLOB validates this formula, so we must match it exactly.
+  const makerUsdc = Math.round(price * takerTokens * 1e5) / 1e5; // e.g., 1.00004
+  const makerAmount = Math.round(makerUsdc * 1e6); // micro-USDC, divisible by 10
 
   const salt = BigInt(Math.floor(Math.random() * 1e15));
-  const expiration = BigInt(Math.floor(Date.now() / 1000) + 3600); // 1h expiry
+  // GTC orders MUST have expiration = 0 (only GTD orders use a timestamp).
+  // CLOB explicitly rejects any non-zero expiration on GTC orders.
+  const expiration = BigInt(0);
   const sideInt = side === "BUY" ? 0 : 1;
 
   const orderData = {
     salt: salt,
     maker: makerAddress,    // proxy (Gnosis Safe) or EOA
-    signer: signerAddress,  // proxy (Gnosis Safe) or EOA — for type 2, Safe validates via EIP-1271
+    signer: signerAddress,  // EOA — CLOB validates off-chain via ecrecover
     taker: "0x0000000000000000000000000000000000000000",
     tokenId: BigInt(tokenId),
     makerAmount: BigInt(makerAmount),

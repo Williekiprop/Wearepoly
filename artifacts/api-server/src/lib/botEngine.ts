@@ -245,6 +245,18 @@ function startPolling(botId: number) {
   runBotCycle(botId);
 }
 
+/**
+ * Called at server startup: if the DB says the bot was running before the
+ * server restarted, resume polling without resetting trades/balance.
+ */
+export async function autoResumeBot() {
+  const state = await ensureBotState();
+  if (state.running && pollingInterval === null) {
+    console.log(`[BOT] Auto-resuming ${state.mode.toUpperCase()} bot (balance $${state.balance?.toFixed(2)}) after restart`);
+    startPolling(state.id);
+  }
+}
+
 function stopPolling() {
   if (pollingInterval) {
     clearInterval(pollingInterval);
