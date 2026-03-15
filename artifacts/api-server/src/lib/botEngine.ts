@@ -378,10 +378,14 @@ function stopPolling() {
 function encode5mMarketId(market: FiveMinMarket): string {
   return `btc5m:${market.windowEnd}:${market.conditionId}`;
 }
-function decode5mMarketId(marketId: string): { windowEnd: number; conditionId: string } | null {
+function decode5mMarketId(marketId: string): { windowEnd: number; conditionId: string; orderId?: string } | null {
   const parts = marketId.split(":");
   if (parts[0] !== "btc5m" || parts.length < 3) return null;
-  return { windowEnd: parseInt(parts[1]), conditionId: parts.slice(2).join(":") };
+  // parts[2] is the conditionId (0x hex, never contains ':')
+  // orderId, if stored, follows after '::' → parts[3]=="" and parts[4]=orderId
+  const conditionId = parts[2];
+  const orderId = parts.length >= 5 && parts[3] === "" ? parts[4] : undefined;
+  return { windowEnd: parseInt(parts[1]), conditionId, orderId };
 }
 
 async function runBotCycle(botId: number) {
@@ -625,16 +629,20 @@ async function resolve5mLivePositions(botId: number) {
 
     if (nowSec < info.windowEnd) continue; // window not done yet
 
-    // Query CLOB to see who won
+    console.log(`[LIVE 5M] Checking resolution for trade #${pos.id} | conditionId=${info.conditionId}`);
+
+    // Query CLOB to see who won — use direct fetch (market data is not geoblocked)
     try {
-      const clobRes = await import("./proxiedFetch.js").then(m =>
-        m.polyFetch(`https://clob.polymarket.com/markets/${info.conditionId}`, {
-          signal: AbortSignal.timeout(8000),
-        })
-      );
-      if (!clobRes.ok) continue;
+      const clobRes = await fetch(`https://clob.polymarket.com/markets/${info.conditionId}`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!clobRes.ok) {
+        console.warn(`[LIVE 5M] CLOB fetch failed (${clobRes.status}) for ${info.conditionId}`);
+        continue;
+      }
 
       const clobData = await clobRes.json() as {
+        closed: boolean;
         tokens: Array<{ token_id: string; outcome: string; price: number; winner: boolean }>;
       };
 
@@ -645,7 +653,7 @@ async function resolve5mLivePositions(botId: number) {
       const downWon = downToken?.winner === true;
 
       if (!upWon && !downWon) {
-        // Market not yet resolved on-chain
+        console.log(`[LIVE 5M] Market not yet resolved (closed=${clobData.closed}) — waiting`);
         continue;
       }
 
@@ -654,8 +662,12 @@ async function resolve5mLivePositions(botId: number) {
 
       const entryPrice = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
       const exitValue = weWon ? 1.0 : 0.0;
-      const pnl = pos.shares * (exitValue - entryPrice);
-      const returnedCapital = pos.positionSize + pnl;
+
+      // If shares=0 (order was resting in book when confirmed), estimate from cost/price
+      const effectiveShares = pos.shares > 0 ? pos.shares : pos.positionSize / entryPrice;
+      const effectiveCost = pos.shares > 0 ? pos.positionSize : effectiveShares * entryPrice;
+      const pnl = effectiveShares * exitValue - effectiveCost; // profit from tokens - cost paid
+      const returnedCapital = effectiveCost + pnl; // = effectiveShares * exitValue
 
       const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
       if (!st) continue;
@@ -666,7 +678,6 @@ async function resolve5mLivePositions(botId: number) {
 
       await db.update(botStateTable).set({
         balance: st.balance + returnedCapital,
-        totalTrades: st.totalTrades + 1,
         winningTrades: weWon ? st.winningTrades + 1 : st.winningTrades,
         losingTrades: weWon ? st.losingTrades : st.losingTrades + 1,
         totalPnl: st.totalPnl + pnl,
@@ -674,15 +685,15 @@ async function resolve5mLivePositions(botId: number) {
       }).where(eq(botStateTable.id, botId));
 
       const direction = weBoughtUp ? "UP" : "DOWN";
-      const winner = upWon ? "UP" : "DOWN";
       const result = weWon ? "WON" : "LOST";
-      console.log(`[LIVE 5M] ${result} ${direction} | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
+      console.log(`[LIVE 5M] ${result} ${direction} | shares=${effectiveShares.toFixed(2)} P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
 
-      // Sync wallet balance after resolution
+      // Sync actual on-chain wallet balance — overrides computed balance above
       const walletBal = await getWalletBalance();
-      if (walletBal !== null && walletBal > 0) {
+      if (walletBal !== null && walletBal >= 0) {
         await db.update(botStateTable).set({ balance: walletBal, lastUpdated: new Date() })
           .where(eq(botStateTable.id, botId));
+        console.log(`[LIVE 5M] Wallet synced: $${walletBal.toFixed(2)}`);
       }
     } catch (err) {
       console.error(`[LIVE 5M] resolve error for trade #${pos.id}:`, err);
