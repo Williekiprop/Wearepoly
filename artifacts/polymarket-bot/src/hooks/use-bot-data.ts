@@ -52,27 +52,58 @@ export function useBrowserOrderRelay(isLive: boolean) {
     let actualShares: number | undefined; // actual tokens received from CLOB fill
     let clobStatus: string | undefined;   // "matched" = on-chain settled, "live" = still in order book
 
-    try {
-      // Route through our own server (/api/bot/relay-submit) instead of calling Polymarket
-      // directly from the browser — this bypasses Cloudflare browser-fingerprint blocks and
-      // Replit workspace CSP restrictions. The server forwards via polyFetch (proxy-aware).
-      console.log("[RELAY] Forwarding order via server relay to:", data.pending.url);
-      const relayRes = await fetch(`${API_BASE}/bot/relay-submit`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: data.pending.url,
-          method: data.pending.method,
-          headers: data.pending.headers,
-          body: data.pending.body,
-        }),
-      });
-      const polyText = await relayRes.text();
-      let polyJson: { orderID?: string; error?: string; errorMsg?: string; takingAmount?: string; makingAmount?: string; status?: string } = {};
-      try { polyJson = JSON.parse(polyText); } catch { /* non-JSON */ }
+    // Helper: parse the Polymarket response from either path
+    const parsePoly = (status: number, text: string) => {
+      let json: { orderID?: string; error?: string; errorMsg?: string; takingAmount?: string; makingAmount?: string; status?: string } = {};
+      try { json = JSON.parse(text); } catch { /* non-JSON */ }
+      return { status, text, json };
+    };
 
-      console.log("[RELAY] Server relay response:", relayRes.status, polyText.slice(0, 500));
-      if (relayRes.ok && polyJson.orderID) {
+    try {
+      // ── PATH 1: Browser → Polymarket DIRECTLY (uses user's VPN/NL IP) ──────
+      // This bypasses Polymarket's geoblock on the Replit server IP.
+      // If CORS blocks it (Replit workspace iframe), we catch the TypeError and fall back.
+      let polyText: string | null = null;
+      let polyStatus = 0;
+      let usedDirectPath = false;
+
+      try {
+        console.log("[RELAY] Trying direct browser → Polymarket:", data.pending.url);
+        const directRes = await fetch(data.pending.url, {
+          method: data.pending.method,
+          headers: { "Content-Type": "application/json", ...data.pending.headers },
+          body: data.pending.body,
+        });
+        polyText = await directRes.text();
+        polyStatus = directRes.status;
+        usedDirectPath = true;
+        console.log("[RELAY] Direct response:", polyStatus, polyText.slice(0, 300));
+      } catch (corsErr) {
+        // CORS or network error — browser can't reach Polymarket directly from this context.
+        // Fall through to server relay.
+        console.warn("[RELAY] Direct fetch blocked (CORS/CSP), falling back to server relay:", corsErr instanceof Error ? corsErr.message : corsErr);
+      }
+
+      // ── PATH 2: Browser → Server → Polymarket (server-side proxy/direct) ──
+      if (!usedDirectPath || polyText === null) {
+        console.log("[RELAY] Using server relay to:", data.pending.url);
+        const relayRes = await fetch(`${API_BASE}/bot/relay-submit`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: data.pending.url,
+            method: data.pending.method,
+            headers: data.pending.headers,
+            body: data.pending.body,
+          }),
+        });
+        polyText = await relayRes.text();
+        polyStatus = relayRes.status;
+        console.log("[RELAY] Server relay response:", polyStatus, polyText.slice(0, 300));
+      }
+
+      const { json: polyJson } = parsePoly(polyStatus, polyText ?? "");
+      if (polyStatus >= 200 && polyStatus < 300 && polyJson.orderID) {
         orderId = polyJson.orderID;
         success = true;
         if (polyJson.takingAmount) actualShares = parseFloat(polyJson.takingAmount);
@@ -80,7 +111,7 @@ export function useBrowserOrderRelay(isLive: boolean) {
         setRelayStatus({ state: "success", orderId });
         setTimeout(() => setRelayStatus({ state: "idle" }), 4000);
       } else {
-        errorMessage = `HTTP ${relayRes.status}: ${polyJson.error ?? polyJson.errorMsg ?? polyText}`;
+        errorMessage = `HTTP ${polyStatus}: ${polyJson.error ?? polyJson.errorMsg ?? polyText}`;
         console.error("[RELAY] Order failed:", errorMessage);
         setRelayStatus({ state: "error", message: errorMessage });
         setTimeout(() => setRelayStatus({ state: "idle" }), 6000);

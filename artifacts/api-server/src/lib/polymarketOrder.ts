@@ -56,6 +56,7 @@ export interface PlaceOrderParams {
   price: number;          // 0.0 to 1.0
   sizeUsdc: number;       // USDC amount to spend (BUY) or expected to receive (SELL)
   sizeTokens?: number;    // SELL only: exact number of tokens to sell (overrides sizeUsdc for amount calc)
+  feeRateBps?: number;    // maker fee rate in basis points (default 1000 = 10%, required for BTC 5m markets)
 }
 
 export interface OrderResult {
@@ -73,7 +74,7 @@ export interface PreparedBrowserOrder {
   method: "POST";
   headers: Record<string, string>;
   body: string;
-  meta: { direction: string; price: number; sizeUsdc: number };
+  meta: { direction: string; price: number; sizeUsdc: number; actualSizeUsdc: number };
 }
 
 function getWallet(): ethers.Wallet {
@@ -218,6 +219,8 @@ async function buildSignedOrder(
   wallet: ethers.Wallet
 ): Promise<object> {
   const { tokenId, side, sizeUsdc } = params;
+  // Default to 1000 bps (10%) — required for BTC 5-minute markets. Other markets typically use 0.
+  const feeRateBps = params.feeRateBps ?? 1000;
   const eoaAddress = await wallet.getAddress();
   const proxyAddress = getProxyAddress();
   const sigType = getSignatureType();
@@ -229,43 +232,48 @@ async function buildSignedOrder(
   const makerAddress = proxyAddress ?? eoaAddress;
   const signerAddress = eoaAddress; // always EOA regardless of mode
 
-  // Polymarket requires prices in 0.001 increments (3 decimal places / 1000 ticks).
-  // Snap to nearest tick to avoid "Invalid order payload" rejections.
-  const price = Math.round(params.price * 1000) / 1000;
+  // Polymarket requires prices on the 0.01 tick grid (1-cent increments).
+  // Snap to nearest 0.01 to satisfy the CLOB's minimum tick-size check.
+  const price = Math.round(params.price * 100) / 100;
   if (price <= 0 || price >= 1) throw new Error(`Price out of range after tick snap: ${price}`);
-  if (price !== params.price) {
-    console.log(`[ORDER] Price snapped ${params.price} → ${price} (tick grid 0.001)`);
+  if (Math.abs(price - params.price) > 1e-9) {
+    console.log(`[ORDER] Price snapped ${params.price} → ${price} (tick grid 0.01)`);
   }
 
-  // Polymarket CLOB amount precision rules:
+  // Polymarket CLOB amount precision rules (enforced server-side):
   //
   // BUY:  maker = USDC in,   taker = tokens out
-  //   takerAmount (tokens): rounded UP to 2 decimal places → divisible by 10,000 micro-tokens
-  //   makerAmount (USDC):   MUST equal round(price × takerTokens, 5 dp) — CLOB validates this
+  //   takerAmount (tokens): max 2 decimal places  → micro-token must be divisible by 10,000
+  //   makerAmount (USDC):   max 4 decimal places  → micro-USDC must be divisible by 100
   //
-  // SELL: maker = tokens in, taker = USDC out
-  //   makerAmount (tokens): exact shares held, rounded to 2 decimal places in token denomination
-  //   takerAmount (USDC):   MUST equal round(price × makerTokens, 5 dp) — same CLOB validation
+  //   The CLOB also validates that the effective price (makerAmount / takerAmount) lands
+  //   exactly on the 0.01 tick grid. To guarantee this, we use WHOLE token quantities
+  //   (0 decimals) and derive USDC = price × tokens — which is always exact when
+  //   price is on the 0.01 grid and tokens is an integer.
   //
-  // Derivation always: fix the token side first, derive the USDC side from it.
+  // SELL: same rule flipped — integer maker-tokens, derived taker-USDC.
 
   let makerAmount: number;
   let takerAmount: number;
 
+  // Polymarket CLOB enforces a minimum of 5 tokens per order side.
+  const MIN_CLOB_TOKENS = 5;
+
   if (side === "BUY") {
     // BUY: pay USDC (maker), receive tokens (taker)
-    const takerTokens = Math.ceil((sizeUsdc / price) * 100) / 100; // tokens out, 2dp
-    takerAmount = Math.round(takerTokens * 1e6);
-    const makerUsdc = Math.round(price * takerTokens * 1e5) / 1e5;
-    makerAmount = Math.round(makerUsdc * 1e6);
+    // Use whole token quantities so derived price = makerUsdc/takerTokens = price exactly.
+    // Enforce minimum token count — a small sizeUsdc may result in fewer than 5 tokens.
+    const takerTokens = Math.max(MIN_CLOB_TOKENS, Math.ceil(sizeUsdc / price));
+    const makerUsdc   = price * takerTokens;              // exact (0.01 × integer = 2dp USDC)
+    takerAmount = takerTokens * 1_000_000;                // micro-tokens, divisible by 10,000 ✓ (integer)
+    makerAmount = Math.round(makerUsdc * 1_000_000);      // micro-USDC, divisible by 100 ✓ (2dp × 10^6)
   } else {
     // SELL: give tokens (maker), receive USDC (taker)
-    // sizeTokens is the exact share count; fall back to sizeUsdc/price if not given
-    const rawTokens = params.sizeTokens ?? (sizeUsdc / price);
-    const makerTokens = Math.floor(rawTokens * 100) / 100; // tokens in, 2dp (floor to avoid over-sell)
-    makerAmount = Math.round(makerTokens * 1e6);
-    const takerUsdc = Math.round(price * makerTokens * 1e5) / 1e5;
-    takerAmount = Math.round(takerUsdc * 1e6);
+    const rawTokens   = params.sizeTokens ?? Math.floor(sizeUsdc / price);
+    const makerTokens = Math.max(MIN_CLOB_TOKENS, Math.floor(rawTokens));
+    const takerUsdc   = price * makerTokens;              // exact (same logic as BUY)
+    makerAmount = makerTokens * 1_000_000;                // micro-tokens, divisible by 10,000 ✓
+    takerAmount = Math.round(takerUsdc * 1_000_000);      // micro-USDC, divisible by 100 ✓
   }
 
   const salt = BigInt(Math.floor(Math.random() * 1e15));
@@ -284,7 +292,7 @@ async function buildSignedOrder(
     takerAmount: BigInt(takerAmount),
     expiration: expiration,
     nonce: BigInt(0),
-    feeRateBps: BigInt(0),
+    feeRateBps: BigInt(feeRateBps),
     side: sideInt,
     signatureType: sigType,
   };
@@ -295,7 +303,7 @@ async function buildSignedOrder(
   // This is identical to signatureType=0; the CLOB knows the proxy<>EOA relationship.
   const signature = await wallet.signTypedData(DOMAIN, ORDER_TYPES, orderData);
 
-  console.log(`[ORDER] signatureType=${sigType} maker=${makerAddress} signer=${signerAddress} eoaSigner=${eoaAddress}`);
+  console.log(`[ORDER] signatureType=${sigType} maker=${makerAddress} signer=${signerAddress} eoaSigner=${eoaAddress} feeRateBps=${feeRateBps}`);
 
   // NOTE: salt must be a JSON integer (not string) to match the CLOB's schema validation.
   // All other uint256 fields (makerAmount, takerAmount, expiration, nonce, feeRateBps)
@@ -310,7 +318,7 @@ async function buildSignedOrder(
     takerAmount: String(takerAmount),
     expiration: String(expiration),
     nonce: "0",
-    feeRateBps: "0",
+    feeRateBps: String(feeRateBps),
     side: side,
     signatureType: sigType,
     signature,
@@ -369,13 +377,19 @@ export async function prepareOrderForBrowser(
   const path = "/order";
   const headers = await buildApiHeaders("POST", path, body);
 
+  // Extract actual USDC cost from the signed order (makerAmount is USDC for BUY, tokens for SELL)
+  const orderObj = signedOrder as Record<string, string | number>;
+  const actualSizeUsdc = params.side === "BUY"
+    ? Number(orderObj.makerAmount) / 1_000_000   // micro-USDC → USDC
+    : params.sizeUsdc;                            // SELL: sizeUsdc is approximate, tokens side is maker
+
   return {
     id: crypto.randomUUID(),
     url: `${CLOB_API}${path}`,
     method: "POST",
     headers,
     body,
-    meta: { direction: params.side, price: params.price, sizeUsdc: params.sizeUsdc },
+    meta: { direction: params.side, price: params.price, sizeUsdc: params.sizeUsdc, actualSizeUsdc },
   };
 }
 

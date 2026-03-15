@@ -42,7 +42,8 @@ interface PendingBrowserOrder {
     estimatedProb: number;
     edge: number;
     kellyScaledPct: number;
-    positionSize: number;
+    positionSize: number;          // requested USDC (may be less than actualSizeUsdc due to min tokens)
+    actualSizeUsdc: number;        // actual USDC sent to CLOB (incl. 5-token minimum enforcement)
     shares: number;
     priceImpact: number;
     btcPrice: number;
@@ -86,7 +87,9 @@ export async function completeBrowserOrder(
   clobStatus?: string,   // "matched" = settled on-chain with tokens; "live" = order still in book
 ): Promise<void> {
   const { botId, orderSide, tradeId, entryPrice, direction, marketPrice, estimatedProb, edge, kellyScaledPct,
-    positionSize, shares: estimatedShares, priceImpact, btcPrice, marketId } = ctx;
+    positionSize, actualSizeUsdc, shares: estimatedShares, priceImpact, btcPrice, marketId } = ctx;
+  // Use the actual USDC deducted by the CLOB (may be larger than positionSize due to min-token rule)
+  const deductedUsdc = actualSizeUsdc ?? positionSize;
 
   // For BUY: use actual tokens received from CLOB; 0 if order is still "live" in book (not matched yet)
   // For SELL: actualShares from CLOB is USDC received; use estimatedShares for PnL calculation
@@ -140,13 +143,13 @@ export async function completeBrowserOrder(
       const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
       if (state) {
         await db.update(botStateTable).set({
-          balance: state.balance - positionSize,
+          balance: state.balance - deductedUsdc,
           totalTrades: state.totalTrades + 1,
-          lastSignal: `LIVE BUY ${direction} — $${positionSize.toFixed(2)} placed`,
+          lastSignal: `LIVE BUY ${direction} — $${deductedUsdc.toFixed(2)} placed`,
           lastUpdated: new Date(),
         }).where(eq(botStateTable.id, botId));
       }
-      console.log(`[LIVE/BROWSER] BUY ${isMatched ? "MATCHED" : "LIVE(pending)"}: ${orderId} | shares=${shares.toFixed(2)} | balance deducted $${positionSize.toFixed(4)}`);
+      console.log(`[LIVE/BROWSER] BUY ${isMatched ? "MATCHED" : "LIVE(pending)"}: ${orderId} | shares=${shares.toFixed(2)} | balance deducted $${deductedUsdc.toFixed(4)}`);
     }
   } else {
     if (orderSide === "SELL" && tradeId != null) {
@@ -515,23 +518,31 @@ async function runBotCycle(botId: number) {
         return;
       }
 
-      // Only attempt entry ONCE per 5-minute window — prevents retry-spam after relay failure
+      // Only attempt entry ONCE per 5-minute window (unless geoblocked — then retry is allowed)
       if (attemptedWindowEnds.has(market5m.windowEnd)) {
         console.log(`[LIVE] Already attempted window ${new Date(market5m.windowEnd * 1000).toISOString()} — waiting for next window`);
         return;
       }
-      attemptedWindowEnds.add(market5m.windowEnd);
-      // Prune old window entries (keep only last 5)
-      if (attemptedWindowEnds.size > 5) {
-        const sorted = [...attemptedWindowEnds].sort((a, b) => a - b);
-        for (let i = 0; i < sorted.length - 5; i++) attemptedWindowEnds.delete(sorted[i]);
-      }
 
       const tokenId = direction === "YES" ? market5m.upTokenId : market5m.downTokenId;
-      await executeLiveTrade(botId, freshState, {
+      const tradeResult = await executeLiveTrade(botId, freshState, {
         direction, marketPrice: upPrice, edge, evPerShare,
         kellyScaledPct: positionSize / freshState.balance, positionSize, shares, priceImpact: 0,
       }, btcData.currentPrice, marketId, market5m.conditionId, tokenId);
+
+      // Mark window attempted only when order was placed or failed for a non-geoblock reason.
+      // On geoblock, leave the window open so the browser relay can still submit it,
+      // and a retry can happen if the proxy reconnects mid-window.
+      if (!tradeResult?.geoblocked) {
+        attemptedWindowEnds.add(market5m.windowEnd);
+        // Prune old window entries (keep only last 5)
+        if (attemptedWindowEnds.size > 5) {
+          const sorted = [...attemptedWindowEnds].sort((a, b) => a - b);
+          for (let i = 0; i < sorted.length - 5; i++) attemptedWindowEnds.delete(sorted[i]);
+        }
+      } else {
+        console.log("[LIVE] Geoblock on this attempt — window left open for browser relay / retry.");
+      }
     }
   } catch (err) {
     console.error("Bot cycle error:", err);
@@ -929,6 +940,7 @@ async function closeMatureLivePositions(
           edge: 0,
           kellyScaledPct: 0,
           positionSize: pos.positionSize,
+          actualSizeUsdc: 0, // SELL: balance is synced from chain, not deducted locally
           shares: pos.shares,
           priceImpact: 0,
           btcPrice: 0,
@@ -964,13 +976,31 @@ async function executeLiveTrade(
   marketId: string,
   conditionId: string | null,
   preloadedTokenId?: string,
-) {
+): Promise<{ geoblocked: boolean }> {
   const { direction, marketPrice, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
 
   const orderSize = Math.max(positionSize, MIN_LIVE_ORDER_USDC);
+
+  // Compute actual USDC the CLOB will deduct, accounting for the 5-token minimum.
+  // If we can't afford the actual cost, skip rather than placing an order that will bounce.
+  const computeActualUsdc = (usdc: number, rawPrice: number) => {
+    const snapped = Math.round(rawPrice * 100) / 100;
+    if (snapped <= 0) return usdc;
+    const tokens = Math.max(5, Math.ceil(usdc / snapped));
+    return snapped * tokens;
+  };
+
   if (orderSize > state.balance) {
     console.log(`[LIVE] Skipping — order size $${orderSize.toFixed(2)} > balance $${state.balance.toFixed(2)}`);
-    return;
+    return { geoblocked: false };
+  }
+
+  // Check actual cost including the 5-token CLOB minimum
+  const limitPriceCheck = direction === "YES" ? marketPrice : 1 - marketPrice;
+  const actualCostCheck = computeActualUsdc(orderSize, limitPriceCheck);
+  if (actualCostCheck > state.balance) {
+    console.log(`[LIVE] Skipping — actual CLOB cost $${actualCostCheck.toFixed(2)} (5 tokens min) > balance $${state.balance.toFixed(2)}`);
+    return { geoblocked: false };
   }
 
   let tokenId: string | null = preloadedTokenId ?? null;
@@ -978,25 +1008,27 @@ async function executeLiveTrade(
 
   if (!tokenId) {
     console.error(`[LIVE] Could not get CLOB token ID for ${direction} on ${conditionId}`);
-    return;
+    return { geoblocked: false };
   }
 
   const limitPrice = direction === "YES" ? marketPrice : 1 - marketPrice;
   const trueYesProb = Math.min(0.95, Math.max(0.05, marketPrice + edge));
-  const tradeCtx = {
+
+  // Helper: build tradeContext using the actual USDC from a prepared order
+  const makeTradeCtx = (actualSizeUsdc: number) => ({
     orderSide: "BUY" as const,
     direction, marketPrice, estimatedProb: trueYesProb, edge,
-    kellyScaledPct, positionSize: orderSize, shares, priceImpact, btcPrice, marketId,
-  };
+    kellyScaledPct, positionSize: orderSize, actualSizeUsdc, shares, priceImpact, btcPrice, marketId,
+  });
 
   // ── Browser-relay mode: no proxy configured → queue for browser to submit ──
   if (!hasProxy()) {
     console.log(`[LIVE] No proxy — queuing ${direction} order for browser relay`);
     try {
       const prepared = await prepareOrderForBrowser({ tokenId, side: "BUY", price: limitPrice, sizeUsdc: orderSize });
-      browserOrderQueue.push({ prepared, botId, tradeContext: tradeCtx, queuedAt: Date.now() });
+      browserOrderQueue.push({ prepared, botId, tradeContext: makeTradeCtx(prepared.meta.actualSizeUsdc), queuedAt: Date.now() });
       await db.update(botStateTable).set({
-        lastSignal: `LIVE ${direction} — awaiting browser relay ($${orderSize.toFixed(2)})`,
+        lastSignal: `LIVE ${direction} — awaiting browser relay ($${prepared.meta.actualSizeUsdc.toFixed(2)})`,
         lastUpdated: new Date(),
       }).where(eq(botStateTable.id, botId));
     } catch (err) {
@@ -1006,11 +1038,11 @@ async function executeLiveTrade(
         lastUpdated: new Date(),
       }).where(eq(botStateTable.id, botId));
     }
-    return;
+    return { geoblocked: false };
   }
 
   // ── Proxy mode: place directly from server ──
-  console.log(`[LIVE] Placing ${direction} order via proxy: $${orderSize.toFixed(2)} @ ${(limitPrice * 100).toFixed(1)}¢`);
+  console.log(`[LIVE] Placing ${direction === "YES" ? "YES (UP)" : "NO (DOWN)"} order via proxy: $${orderSize.toFixed(2)} @ ${(limitPrice * 100).toFixed(1)}¢`);
   const result = await placeOrder({ tokenId, side: "BUY", price: limitPrice, sizeUsdc: orderSize });
 
   if (result.success) {
@@ -1030,17 +1062,18 @@ async function executeLiveTrade(
       lastUpdated: new Date(),
     }).where(eq(botStateTable.id, botId));
     console.log(`[LIVE] Order placed OK: ${result.orderId}`);
+    return { geoblocked: false };
   } else {
     const errorMsg = result.errorMessage ?? "";
-    console.error(`[LIVE] Order failed: ${errorMsg}`);
+    console.error(`[LIVE ORDER] Failed: ${errorMsg}`);
     const isGeoblock = errorMsg.includes("restricted") || errorMsg.includes("geoblock") || errorMsg.includes("region");
     if (isGeoblock) {
       console.warn("[LIVE] Proxy geoblocked — suspending for 5 min (will auto-retry when VPN region changes).");
       markProxyGeoblocked(); // 5-min cooldown; proxy URL preserved for auto-retry
-      // Queue the same order via browser relay so the browser can submit it
+      // Queue the same order via browser relay so the browser (on user's VPN) can submit it
       try {
         const prepared = await prepareOrderForBrowser({ tokenId, side: "BUY", price: limitPrice, sizeUsdc: orderSize });
-        browserOrderQueue.push({ prepared, botId, tradeContext: tradeCtx, queuedAt: Date.now() });
+        browserOrderQueue.push({ prepared, botId, tradeContext: makeTradeCtx(prepared.meta.actualSizeUsdc), queuedAt: Date.now() });
         await db.update(botStateTable).set({
           lastSignal: `LIVE ${direction} — proxy geoblocked, awaiting browser relay ($${orderSize.toFixed(2)})`,
           lastUpdated: new Date(),
@@ -1053,11 +1086,13 @@ async function executeLiveTrade(
           lastUpdated: new Date(),
         }).where(eq(botStateTable.id, botId));
       }
+      return { geoblocked: true }; // ← caller should NOT mark window as attempted
     } else {
       await db.update(botStateTable).set({
         lastSignal: `ORDER FAILED: ${errorMsg.substring(0, 60)}`,
         lastUpdated: new Date(),
       }).where(eq(botStateTable.id, botId));
+      return { geoblocked: false };
     }
   }
 }
