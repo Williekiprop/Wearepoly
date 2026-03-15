@@ -256,21 +256,17 @@ async function buildSignedOrder(
   let makerAmount: number;
   let takerAmount: number;
 
-  // Polymarket CLOB enforces a minimum of 5 tokens per order side.
-  const MIN_CLOB_TOKENS = 5;
-
   if (side === "BUY") {
     // BUY: pay USDC (maker), receive tokens (taker)
     // Use whole token quantities so derived price = makerUsdc/takerTokens = price exactly.
-    // Enforce minimum token count — a small sizeUsdc may result in fewer than 5 tokens.
-    const takerTokens = Math.max(MIN_CLOB_TOKENS, Math.ceil(sizeUsdc / price));
+    const takerTokens = Math.ceil(sizeUsdc / price);
     const makerUsdc   = price * takerTokens;              // exact (0.01 × integer = 2dp USDC)
     takerAmount = takerTokens * 1_000_000;                // micro-tokens, divisible by 10,000 ✓ (integer)
     makerAmount = Math.round(makerUsdc * 1_000_000);      // micro-USDC, divisible by 100 ✓ (2dp × 10^6)
   } else {
     // SELL: give tokens (maker), receive USDC (taker)
     const rawTokens   = params.sizeTokens ?? Math.floor(sizeUsdc / price);
-    const makerTokens = Math.max(MIN_CLOB_TOKENS, Math.floor(rawTokens));
+    const makerTokens = Math.max(1, Math.floor(rawTokens));
     const takerUsdc   = price * makerTokens;              // exact (same logic as BUY)
     makerAmount = makerTokens * 1_000_000;                // micro-tokens, divisible by 10,000 ✓
     takerAmount = Math.round(takerUsdc * 1_000_000);      // micro-USDC, divisible by 100 ✓

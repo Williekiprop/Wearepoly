@@ -42,8 +42,8 @@ interface PendingBrowserOrder {
     estimatedProb: number;
     edge: number;
     kellyScaledPct: number;
-    positionSize: number;          // requested USDC (may be less than actualSizeUsdc due to min tokens)
-    actualSizeUsdc: number;        // actual USDC sent to CLOB (incl. 5-token minimum enforcement)
+    positionSize: number;          // requested USDC
+    actualSizeUsdc: number;        // actual USDC sent to CLOB (may differ due to rounding)
     shares: number;
     priceImpact: number;
     btcPrice: number;
@@ -992,25 +992,8 @@ async function executeLiveTrade(
 
   const orderSize = Math.max(positionSize, MIN_LIVE_ORDER_USDC);
 
-  // Compute actual USDC the CLOB will deduct, accounting for the 5-token minimum.
-  // If we can't afford the actual cost, skip rather than placing an order that will bounce.
-  const computeActualUsdc = (usdc: number, rawPrice: number) => {
-    const snapped = Math.round(rawPrice * 100) / 100;
-    if (snapped <= 0) return usdc;
-    const tokens = Math.max(5, Math.ceil(usdc / snapped));
-    return snapped * tokens;
-  };
-
   if (orderSize > state.balance) {
     console.log(`[LIVE] Skipping — order size $${orderSize.toFixed(2)} > balance $${state.balance.toFixed(2)}`);
-    return { geoblocked: false };
-  }
-
-  // Check actual cost including the 5-token CLOB minimum
-  const limitPriceCheck = direction === "YES" ? marketPrice : 1 - marketPrice;
-  const actualCostCheck = computeActualUsdc(orderSize, limitPriceCheck);
-  if (actualCostCheck > state.balance) {
-    console.log(`[LIVE] Skipping — actual CLOB cost $${actualCostCheck.toFixed(2)} (5 tokens min) > balance $${state.balance.toFixed(2)}`);
     return { geoblocked: false };
   }
 
