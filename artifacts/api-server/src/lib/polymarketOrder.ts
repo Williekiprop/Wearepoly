@@ -269,9 +269,10 @@ export async function cancelOrder(orderId: string): Promise<boolean> {
 export async function getWalletBalance(): Promise<number | null> {
   try {
     const wallet = getWallet();
-    const path = `/balance-allowance?asset_type=USDC&signature_type=0`;
-    const headers = await buildApiHeaders("GET", path);
-    const res = await polyFetch(`${CLOB_API}${path}`, {
+    const signPath = `/balance-allowance`; // HMAC signs base path only (no query string)
+    const fullPath = `/balance-allowance?asset_type=USDC&signature_type=0`;
+    const headers = await buildApiHeaders("GET", signPath);
+    const res = await polyFetch(`${CLOB_API}${fullPath}`, {
       headers,
       signal: AbortSignal.timeout(8000),
     });
