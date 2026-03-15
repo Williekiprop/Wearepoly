@@ -9,7 +9,10 @@
 
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 
-let _runtimeUrl: string | null = null;
+// undefined  = never set by user (fall back to PROXY_URL env var)
+// null       = user explicitly cleared (ignore env var)
+// string     = user-supplied override URL
+let _runtimeUrl: string | null | undefined = undefined;
 let _agent: ProxyAgent | null = null;
 let _proxyFetch: typeof fetch | null = null;
 
@@ -21,7 +24,10 @@ function cleanUrl(url: string): string {
 }
 
 function getActiveUrl(): string | null {
-  const raw = _runtimeUrl ?? process.env.PROXY_URL ?? null;
+  // If user has explicitly set or cleared at runtime, respect that — never fall back to env var
+  if (_runtimeUrl !== undefined) return _runtimeUrl ? cleanUrl(_runtimeUrl) : null;
+  // Otherwise use the env var (startup default)
+  const raw = process.env.PROXY_URL ?? null;
   return raw ? cleanUrl(raw) : null;
 }
 
