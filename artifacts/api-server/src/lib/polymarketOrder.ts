@@ -73,7 +73,9 @@ function buildHmacSignature(
   const message = `${timestamp}${method}${path}${body}`;
   const normalized = secret.replace(/-/g, "+").replace(/_/g, "/");
   const secretBuffer = Buffer.from(normalized, "base64");
-  return crypto.createHmac("sha256", secretBuffer).update(message).digest("base64");
+  const sig = crypto.createHmac("sha256", secretBuffer).update(message).digest("base64");
+  // Polymarket requires URL-safe base64 output for POLY-SIGNATURE
+  return sig.replace(/\+/g, "-").replace(/\//g, "_");
 }
 
 function buildApiHeaders(
