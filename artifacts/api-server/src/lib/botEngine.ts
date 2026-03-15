@@ -181,6 +181,12 @@ export async function completeBrowserOrder(
 
 const TEST_HOLD_MS = 30_000;  // 30 seconds minimum hold before closing a test position
 
+// Take-profit threshold for TEST mode early exits.
+// If the model probability has moved ≥5 percentage points in our favour after
+// the minimum hold, close immediately and bank the gain rather than waiting for
+// binary resolution (which might reverse).  5 pp on ~2 shares ≈ +$0.10 / trade.
+const TAKE_PROFIT_EDGE_PP = 0.05;
+
 // Minimum time to hold a LIVE position before considering an early exit.
 // 30s gives the trade a moment to breathe; natural resolution at window end is the primary exit.
 const LIVE_MIN_HOLD_MS = 30_000; // 30 seconds
@@ -505,17 +511,35 @@ async function runBotCycle(botId: number) {
         const heldMs = Date.now() - pos.timestamp.getTime();
         const signalFlipped = pos.direction !== direction;
 
-        if (signalFlipped && heldMs >= TEST_HOLD_MS) {
-          // Signal reversed and hold period satisfied — exit and flip
-          await closeTestPositionEarly(botId, pos, upPrice);
-          const [updatedState] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
-          if (!updatedState || updatedState.balance < 1.0) return;
-          const newSize  = Math.min(positionSize, updatedState.balance);
-          const newShares = entryPrice > 0 ? newSize / entryPrice : 0;
-          await openTestPosition(botId, updatedState, {
-            direction, marketPrice: upPrice, edge, evPerShare,
-            kellyScaledPct: newSize / updatedState.balance, positionSize: newSize, shares: newShares, priceImpact: 0,
-          }, btcData.currentPrice, marketId);
+        if (heldMs >= TEST_HOLD_MS) {
+          // Compute how far the model has moved in our favour since entry.
+          // Entry price was recorded as the Polymarket market price for our side.
+          // Current fair value is the model probability for that same side.
+          const weBoughtUp = pos.direction === "YES";
+          const entryModelPrice = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
+          const currentModelPrice = weBoughtUp ? probUp : 1 - probUp;
+          const modelEdgeGain = currentModelPrice - entryModelPrice;
+
+          if (modelEdgeGain >= TAKE_PROFIT_EDGE_PP) {
+            // Model has moved ≥5pp in our favour — bank the gain now
+            const estPnl = pos.shares * modelEdgeGain;
+            console.log(`[5M TEST] Take-profit ${weBoughtUp ? "UP" : "DOWN"} | model moved +${(modelEdgeGain*100).toFixed(1)}pp | est P&L +$${estPnl.toFixed(4)}`);
+            await closeTestPositionEarly(botId, pos, probUp);
+            return;
+          }
+
+          if (signalFlipped) {
+            // Signal reversed — exit at model price and open in the new direction
+            await closeTestPositionEarly(botId, pos, probUp);
+            const [updatedState] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+            if (!updatedState || updatedState.balance < 1.0) return;
+            const newSize  = Math.min(positionSize, updatedState.balance);
+            const newShares = entryPrice > 0 ? newSize / entryPrice : 0;
+            await openTestPosition(botId, updatedState, {
+              direction, marketPrice: upPrice, edge, evPerShare,
+              kellyScaledPct: newSize / updatedState.balance, positionSize: newSize, shares: newShares, priceImpact: 0,
+            }, btcData.currentPrice, marketId);
+          }
         } else if (signalFlipped) {
           console.log(`[5M TEST] Flip signal (${pos.direction}→${direction}) but held only ${Math.round(heldMs/1000)}s — waiting for ${TEST_HOLD_MS/1000}s min`);
         }
@@ -768,17 +792,23 @@ async function openTestPosition(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// TEST MODE — Early mark-to-market exit (flip or take-profit before window end)
+// TEST MODE — Early mark-to-MODEL exit (take-profit or flip before window end)
+//
+// Polymarket 5-min markets are illiquid — the UP/DOWN prices barely change.
+// Exiting at the market price always yields ~$0 P&L regardless of BTC moves.
+// Instead we exit at the current model probability (same as window-end resolution):
+//   fair value = probUp for UP tokens, (1 - probUp) for DOWN tokens.
+// This captures real P&L from BTC momentum without waiting for binary resolution.
 // ──────────────────────────────────────────────────────────────────────────────
 
 async function closeTestPositionEarly(
   botId: number,
   pos: { id: number; direction: "YES" | "NO"; marketPrice: number; shares: number; positionSize: number },
-  exitUpPrice: number,   // current Polymarket UP token price
+  currentProbUp: number,   // model's current probability estimate for UP
 ) {
   const weBoughtUp = pos.direction === "YES";
-  // Exit at current market price for the side we hold
-  const exitPrice = weBoughtUp ? exitUpPrice : 1 - exitUpPrice;
+  // Exit at MODEL probability, not illiquid market price
+  const exitPrice = weBoughtUp ? currentProbUp : 1 - currentProbUp;
   const entryPrice = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
   const pnl = pos.shares * (exitPrice - entryPrice);
   const returnedCapital = pos.positionSize + pnl;
@@ -800,7 +830,7 @@ async function closeTestPositionEarly(
   }).where(eq(botStateTable.id, botId));
 
   const dir = weBoughtUp ? "UP" : "DOWN";
-  console.log(`[5M TEST] Early exit ${dir} @ ${(exitPrice * 100).toFixed(1)}¢ | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
+  console.log(`[5M TEST] Early exit ${dir} | model fair value ${(exitPrice * 100).toFixed(1)}¢ | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
