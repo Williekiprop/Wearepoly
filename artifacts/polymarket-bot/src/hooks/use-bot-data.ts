@@ -52,6 +52,9 @@ export function useBrowserOrderRelay(isLive: boolean) {
 
     try {
       // POST directly to Polymarket from this browser (VPN-connected machine)
+      const orderBody = JSON.parse(data.pending.body);
+      console.log("[RELAY] Submitting order to:", data.pending.url);
+      console.log("[RELAY] Order body:", JSON.stringify(orderBody, null, 2));
       const polyRes = await fetch(data.pending.url, {
         method: "POST",
         headers: data.pending.headers,
@@ -61,18 +64,21 @@ export function useBrowserOrderRelay(isLive: boolean) {
       let polyJson: { orderID?: string; error?: string; errorMsg?: string } = {};
       try { polyJson = JSON.parse(polyText); } catch { /* non-JSON */ }
 
+      console.log("[RELAY] Polymarket response:", polyRes.status, polyText.slice(0, 500));
       if (polyRes.ok && polyJson.orderID) {
         orderId = polyJson.orderID;
         success = true;
         setRelayStatus({ state: "success", orderId });
         setTimeout(() => setRelayStatus({ state: "idle" }), 4000);
       } else {
-        errorMessage = polyJson.error ?? polyJson.errorMsg ?? polyText ?? `HTTP ${polyRes.status}`;
-        setRelayStatus({ state: "error", message: errorMessage ?? "Unknown error" });
+        errorMessage = `HTTP ${polyRes.status}: ${polyJson.error ?? polyJson.errorMsg ?? polyText}`;
+        console.error("[RELAY] Order failed:", errorMessage);
+        setRelayStatus({ state: "error", message: errorMessage });
         setTimeout(() => setRelayStatus({ state: "idle" }), 6000);
       }
     } catch (e) {
       errorMessage = e instanceof Error ? e.message : String(e);
+      console.error("[RELAY] Fetch exception:", errorMessage);
       setRelayStatus({ state: "error", message: errorMessage });
       setTimeout(() => setRelayStatus({ state: "idle" }), 6000);
     }

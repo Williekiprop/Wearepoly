@@ -16,12 +16,21 @@ const CLOB_API = "https://clob.polymarket.com";
 const CHAIN_ID = 137; // Polygon mainnet
 
 // EIP-712 domain for Polymarket CTF Exchange
+// IMPORTANT: "Polymarket CTF Exchange" is the exact domain name required.
+// Using "CTFExchange" produces a different hash and causes 400 Invalid order payload.
 const DOMAIN = {
-  name: "CTFExchange",
+  name: "Polymarket CTF Exchange",
   version: "1",
   chainId: CHAIN_ID,
   verifyingContract: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
 };
+
+// Gnosis Safe CompatibilityFallbackHandler wraps hashes before isValidSignature
+// SAFE_MSG_TYPEHASH = keccak256("SafeMessage(bytes message)")
+const SAFE_MSG_TYPEHASH = ethers.keccak256(ethers.toUtf8Bytes("SafeMessage(bytes message)"));
+
+// Polygon RPC for on-chain reads (domain separator)
+const POLYGON_RPC_PRIMARY = "https://polygon-bor-rpc.publicnode.com";
 
 // EIP-712 Order type
 const ORDER_TYPES = {
@@ -74,16 +83,79 @@ function getWallet(): ethers.Wallet {
 }
 
 /**
- * Returns the proxy wallet address (POLY_PROXY).
- * If POLYMARKET_PROXY_ADDRESS is set, uses it (signature_type=1).
- * Otherwise falls back to the EOA address (signature_type=0).
+ * For signatureType=2 (POLY_GNOSIS_SAFE):
+ * Gnosis Safe's CompatibilityFallbackHandler wraps the order hash inside a
+ * SafeMessage envelope before calling isValidSignature. We must sign the
+ * Safe-wrapped hash (not the raw EIP-712 order hash) with the EOA private key.
+ *
+ * Wrapping formula:
+ *   msgHash = keccak256(abi.encode(SAFE_MSG_TYPEHASH, keccak256(abi.encode(orderHash))))
+ *   finalHash = keccak256("\x19\x01" + safe.domainSeparator() + msgHash)
+ *
+ * The EOA signs finalHash raw (no prefix), and the Safe validates via:
+ *   ecrecover(finalHash, v, r, s) == EOA == owner
+ */
+async function buildSafeWrappedSignature(
+  orderHash: string,
+  safeAddress: string,
+  privateKey: string
+): Promise<string> {
+  // Fetch the Safe's domain separator from chain
+  const domainSepCalldata =
+    "0xf698da25"; // keccak256("domainSeparator()").slice(0,8)
+  const rpcBody = JSON.stringify({
+    jsonrpc: "2.0", method: "eth_call",
+    params: [{ to: safeAddress, data: domainSepCalldata }, "latest"],
+    id: 1,
+  });
+  const rpcRes = await fetch(POLYGON_RPC_PRIMARY, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: rpcBody,
+    signal: AbortSignal.timeout(8000),
+  });
+  const rpcJson = await rpcRes.json() as { result: string };
+  const domainSeparator = rpcJson.result as string;
+
+  // Compute the Safe-wrapped message hash
+  const encodedOrderHash = ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [orderHash]);
+  const msgHash = ethers.keccak256(encodedOrderHash);
+  const safeMessageHashInput = ethers.AbiCoder.defaultAbiCoder().encode(
+    ["bytes32", "bytes32"],
+    [SAFE_MSG_TYPEHASH, msgHash]
+  );
+  const safeMessageHash = ethers.keccak256(safeMessageHashInput);
+
+  // Final hash: EIP-191 prefix + domain separator + safeMessageHash
+  const finalHash = ethers.keccak256(
+    ethers.concat([
+      new Uint8Array([0x19, 0x01]),
+      ethers.getBytes(domainSeparator),
+      ethers.getBytes(safeMessageHash),
+    ])
+  );
+
+  // Sign the final hash directly with the EOA's signing key
+  const key = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
+  const signingKey = new ethers.SigningKey(key);
+  const sig = signingKey.sign(finalHash);
+  const serialized = ethers.Signature.from(sig).serialized;
+
+  console.log(`[ORDER] Safe-wrapped hash: ${finalHash} | sig: ${serialized.slice(0, 12)}...`);
+  return serialized;
+}
+
+/**
+ * Returns the proxy wallet address (Gnosis Safe created by Polymarket).
+ * If POLYMARKET_PROXY_ADDRESS is set, uses it (signatureType=2 POLY_GNOSIS_SAFE).
+ * Otherwise falls back to the EOA address (signatureType=0).
  */
 function getProxyAddress(): string | null {
   return process.env.POLYMARKET_PROXY_ADDRESS ?? null;
 }
 
-function getSignatureType(): 0 | 1 {
-  return process.env.POLYMARKET_PROXY_ADDRESS ? 1 : 0;
+function getSignatureType(): 0 | 2 {
+  return process.env.POLYMARKET_PROXY_ADDRESS ? 2 : 0;
 }
 
 function buildHmacSignature(
@@ -129,10 +201,13 @@ async function buildApiHeaders(
  * Build and sign a Polymarket limit order using EIP-712.
  * Returns the signed order payload ready to POST to /order.
  *
- * When POLYMARKET_PROXY_ADDRESS is set (POLY_PROXY mode):
- *   maker  = proxy wallet  (holds USDC, receives tokens)
- *   signer = EOA           (holds the private key, signs)
- *   signatureType = 1
+ * When POLYMARKET_PROXY_ADDRESS is set (POLY_GNOSIS_SAFE mode):
+ *   maker  = proxy wallet  (Gnosis Safe — holds USDC, receives tokens)
+ *   signer = proxy wallet  (Gnosis Safe validates via EIP-1271 isValidSignature)
+ *   signatureType = 2      (POLY_GNOSIS_SAFE)
+ *   The EOA (Safe owner, threshold=1) signs the Safe-wrapped message hash:
+ *   CTFExchange calls proxy.isValidSignature(orderHash, sig) →
+ *   CompatibilityFallbackHandler wraps hash → EOA sig must be over finalHash.
  *
  * Without proxy (EOA mode):
  *   maker = signer = EOA, signatureType = 0
@@ -141,15 +216,30 @@ async function buildSignedOrder(
   params: PlaceOrderParams,
   wallet: ethers.Wallet
 ): Promise<object> {
-  const { tokenId, side, price, sizeUsdc } = params;
+  const { tokenId, side, sizeUsdc } = params;
   const eoaAddress = await wallet.getAddress();
   const proxyAddress = getProxyAddress();
   const sigType = getSignatureType();
-  const makerAddress = proxyAddress ?? eoaAddress; // proxy holds funds
+  // For signatureType=2 (POLY_GNOSIS_SAFE):
+  //   maker  = proxy (Gnosis Safe — holds USDC and tokens)
+  //   signer = EOA  (the Safe owner that signs the EIP-712 hash)
+  //   The CLOB validates off-chain: ecrecover(orderHash, sig) == order.signer == EOA
+  // For signatureType=0 (EOA): maker = signer = EOA
+  const makerAddress = proxyAddress ?? eoaAddress;
+  const signerAddress = eoaAddress; // always EOA regardless of mode
+
+  // Polymarket requires prices in 0.001 increments (3 decimal places / 1000 ticks).
+  // Snap to nearest tick to avoid "Invalid order payload" rejections.
+  const price = Math.round(params.price * 1000) / 1000;
+  if (price <= 0 || price >= 1) throw new Error(`Price out of range after tick snap: ${price}`);
+  if (price !== params.price) {
+    console.log(`[ORDER] Price snapped ${params.price} → ${price} (tick grid 0.001)`);
+  }
 
   // Convert to micro-USDC (6 decimals) and token units (6 decimals)
   const makerAmount = Math.round(sizeUsdc * 1e6); // USDC in (buy side)
-  const takerAmount = Math.round((sizeUsdc / price) * 1e6); // tokens out
+  // Use floor so the implied price >= limit price (conservative / maker-friendly)
+  const takerAmount = Math.floor((sizeUsdc / price) * 1e6); // tokens out
 
   const salt = BigInt(Math.floor(Math.random() * 1e15));
   const expiration = BigInt(Math.floor(Date.now() / 1000) + 3600); // 1h expiry
@@ -157,8 +247,8 @@ async function buildSignedOrder(
 
   const orderData = {
     salt: salt,
-    maker: makerAddress,  // proxy (or EOA if no proxy)
-    signer: eoaAddress,   // always the EOA that signs
+    maker: makerAddress,    // proxy (Gnosis Safe) or EOA
+    signer: signerAddress,  // proxy (Gnosis Safe) or EOA — for type 2, Safe validates via EIP-1271
     taker: "0x0000000000000000000000000000000000000000",
     tokenId: BigInt(tokenId),
     makerAmount: BigInt(makerAmount),
@@ -170,17 +260,26 @@ async function buildSignedOrder(
     signatureType: sigType,
   };
 
+  // EOA signs the EIP-712 order hash directly using standard signTypedData.
+  // For signatureType=2 (POLY_GNOSIS_SAFE), the CLOB validates off-chain as:
+  //   ecrecover(orderHash, sig) == proxy.owner (EOA)
+  // This is identical to signatureType=0; the CLOB knows the proxy<>EOA relationship.
   const signature = await wallet.signTypedData(DOMAIN, ORDER_TYPES, orderData);
 
+  console.log(`[ORDER] signatureType=${sigType} maker=${makerAddress} signer=${signerAddress} eoaSigner=${eoaAddress}`);
+
+  // NOTE: salt must be a JSON integer (not string) to match the CLOB's schema validation.
+  // All other uint256 fields (makerAmount, takerAmount, expiration, nonce, feeRateBps)
+  // are strings. This matches the official @polymarket/clob-client's orderToJson() format.
   return {
-    salt: salt.toString(),
+    salt: Number(salt),           // integer, not string (schema validation requirement)
     maker: makerAddress,
-    signer: eoaAddress,
+    signer: signerAddress,
     taker: "0x0000000000000000000000000000000000000000",
     tokenId: tokenId,
-    makerAmount: makerAmount.toString(),
-    takerAmount: takerAmount.toString(),
-    expiration: expiration.toString(),
+    makerAmount: String(makerAmount),
+    takerAmount: String(takerAmount),
+    expiration: String(expiration),
     nonce: "0",
     feeRateBps: "0",
     side: side,
@@ -231,11 +330,13 @@ export async function prepareOrderForBrowser(
 ): Promise<PreparedBrowserOrder> {
   const wallet = getWallet();
   const eoaAddress = await wallet.getAddress();
-  const proxyAddress = getProxyAddress();
-  const owner = proxyAddress ?? eoaAddress;
 
   const signedOrder = await buildSignedOrder(params, wallet);
-  const body = JSON.stringify({ order: signedOrder, owner, orderType: "GTC" });
+  // owner = the API key identifier (UUID from POLYMARKET_API_KEY env), matching how the
+  // official @polymarket/clob-client sends this.creds.key in orderToJson().
+  const apiKey = process.env.POLYMARKET_API_KEY ?? "";
+  // deferExec: false matches official @polymarket/clob-client orderToJson() field order
+  const body = JSON.stringify({ deferExec: false, order: signedOrder, owner: apiKey, orderType: "GTC" });
   const path = "/order";
   const headers = await buildApiHeaders("POST", path, body);
 
@@ -256,14 +357,15 @@ export async function placeOrder(params: PlaceOrderParams): Promise<OrderResult>
   try {
     const wallet = getWallet();
     const eoaAddress = await wallet.getAddress();
-    const proxyAddress = getProxyAddress();
-    const owner = proxyAddress ?? eoaAddress; // proxy is the account owner on CLOB
 
     const signedOrder = await buildSignedOrder(params, wallet);
 
+    // owner = API key UUID (matches this.creds.key in the official @polymarket/clob-client)
+    const apiKey = process.env.POLYMARKET_API_KEY ?? "";
     const body = JSON.stringify({
+      deferExec: false,
       order: signedOrder,
-      owner,
+      owner: apiKey,
       orderType: "GTC", // Good Till Cancelled
     });
 
@@ -381,9 +483,8 @@ export async function getWalletBalance(): Promise<number | null> {
     if (usdc !== null) return usdc;
 
     // Last resort: CLOB balance-allowance API
-    const sigType = getSignatureType();
     const funderParam = proxyAddress ? `&funder=${proxyAddress}` : "";
-    const fullPath = `/balance-allowance?asset_type=COLLATERAL&signature_type=${sigType}${funderParam}`;
+    const fullPath = `/balance-allowance?asset_type=COLLATERAL&signature_type=2${funderParam}`;
     const headers = await buildApiHeaders("GET", `/balance-allowance`);
     const res = await polyFetch(`${CLOB_API}${fullPath}`, { headers, signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;

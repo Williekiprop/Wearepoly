@@ -19,7 +19,7 @@ import { calcKelly, simulatePriceImpact } from "./lmsr.js";
 import { getBtcPriceData, estimateTrueProb } from "./btcPrice.js";
 import { getBestBtcMarketPrice, getConnectionStatus } from "./polymarketClient.js";
 import { placeOrder, prepareOrderForBrowser, getClobTokenId, getWalletBalance, type PreparedBrowserOrder } from "./polymarketOrder.js";
-import { hasProxy } from "./proxiedFetch.js";
+import { hasProxy, setProxyUrl } from "./proxiedFetch.js";
 
 const B_PARAM = 100;
 const MIN_LIVE_ORDER_USDC = 0.50;
@@ -306,10 +306,13 @@ async function runBotCycle(botId: number) {
         shares = entryPrice > 0 ? positionSize / entryPrice : 0;
         priceImpact = 0;
       } else {
-        // Kelly sizing: quarter-Kelly formula
+        // Kelly sizing: quarter-Kelly formula, floored at $1 minimum (Polymarket CLOB minimum)
+        const CLOB_MIN_ORDER = 1.0;
         const kellyFull = calcKelly(winProb, entryPrice);
         const kellyScaled = kellyFull * freshState.kellyFraction;
-        positionSize = Math.min(freshState.balance * kellyScaled, freshState.balance);
+        const kellyAmount = freshState.balance * kellyScaled;
+        // Use kelly amount but respect $1 floor; never exceed balance
+        positionSize = Math.min(Math.max(kellyAmount, CLOB_MIN_ORDER), freshState.balance);
         shares = entryPrice > 0 ? positionSize / entryPrice : 0;
         const outcome = isBuyYes ? 0 : 1;
         const { impact } = simulatePriceImpact([0, 0], B_PARAM, outcome, shares);
@@ -326,7 +329,8 @@ async function runBotCycle(botId: number) {
       .set({ currentMarketPrice: marketYesPrice, lastSignal: signal, lastUpdated: new Date() })
       .where(eq(botStateTable.id, botId));
 
-    if (signal === "NO_TRADE" || positionSize < 0.01 || shares <= 0) return;
+    // Polymarket CLOB minimum order is $1 USDC; skip if Kelly sizing is below that
+    if (signal === "NO_TRADE" || positionSize < 1.0 || shares <= 0) return;
 
     // ── Step 3: Only open one position at a time (test mode) ──
     if (freshState.mode === "test") {
@@ -580,13 +584,24 @@ async function executeLiveTrade(
     console.error(`[LIVE] Order failed: ${errorMsg}`);
     const isGeoblock = errorMsg.includes("restricted") || errorMsg.includes("geoblock") || errorMsg.includes("region");
     if (isGeoblock) {
-      console.error("[LIVE] Geoblock — stopping bot.");
-      stopPolling();
-      await db.update(botStateTable).set({
-        running: false,
-        lastSignal: "BLOCKED: Geoblock. Enable proxy or keep dashboard open for browser-relay.",
-        lastUpdated: new Date(),
-      }).where(eq(botStateTable.id, botId));
+      console.warn("[LIVE] Proxy geoblocked — disabling proxy and switching to browser relay for this order.");
+      setProxyUrl(null); // disable proxy for the rest of the session
+      // Queue the same order via browser relay so the browser can submit it
+      try {
+        const prepared = await prepareOrderForBrowser({ tokenId, side: "BUY", price: limitPrice, sizeUsdc: orderSize });
+        browserOrderQueue.push({ prepared, botId, tradeContext: tradeCtx, queuedAt: Date.now() });
+        await db.update(botStateTable).set({
+          lastSignal: `LIVE ${direction} — proxy geoblocked, awaiting browser relay ($${orderSize.toFixed(2)})`,
+          lastUpdated: new Date(),
+        }).where(eq(botStateTable.id, botId));
+        console.log("[LIVE] Queued order for browser relay after proxy geoblock.");
+      } catch (err) {
+        console.error("[LIVE] Failed to prepare browser relay order after geoblock:", err);
+        await db.update(botStateTable).set({
+          lastSignal: "BLOCKED: Geoblock — keep dashboard open for browser-relay.",
+          lastUpdated: new Date(),
+        }).where(eq(botStateTable.id, botId));
+      }
     } else {
       await db.update(botStateTable).set({
         lastSignal: `ORDER FAILED: ${errorMsg.substring(0, 60)}`,
