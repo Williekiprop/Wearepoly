@@ -520,23 +520,12 @@ async function runBotCycle(botId: number) {
             console.log(
               `[5M TEST] Take-profit ${dir} | market +${(marketGain * 100).toFixed(1)}¢ ` +
               `(${(entryHeldPrice * 100).toFixed(1)}¢ → ${(currentHeldPrice * 100).toFixed(1)}¢) | ` +
-              `est P&L +$${estPnl.toFixed(4)}`
+              `P&L +$${estPnl.toFixed(4)}`
             );
             await closeTestPositionEarly(botId, pos, upPrice);
-
-            // Re-enter same direction if there's still a signal and time left
-            if (!tooLate && signal !== "NO_TRADE" && positionSize >= 1.0) {
-              const [afterTp] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
-              if (afterTp && afterTp.balance >= 1.0) {
-                const reSize   = Math.min(positionSize, afterTp.balance);
-                const reShares = entryPrice > 0 ? reSize / entryPrice : 0;
-                const reEvPerShare = winProb * (1 - entryPrice) - (1 - winProb) * entryPrice;
-                await openTestPosition(botId, afterTp, {
-                  direction, marketPrice: upPrice, edge, evPerShare: reEvPerShare,
-                  kellyScaledPct: reSize / afterTp.balance, positionSize: reSize, shares: reShares, priceImpact: 0,
-                }, btcData.currentPrice, encode5mMarketId(market5m));
-              }
-            }
+            // Do NOT re-enter immediately — wait for the price to pull back to a
+            // better level.  The normal cycle will open a new position next tick
+            // once the edge calculation says the price is attractive again.
             return;
           }
         }
