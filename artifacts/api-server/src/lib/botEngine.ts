@@ -274,7 +274,7 @@ export async function startBot(opts: {
       currentMarketPrice: undefined,
       lastSignal: opts.mode === "live" ? "LIVE MODE — Connecting..." : "Paper trading on live feed...",
       kellyFraction: opts.kellyFraction ?? 0.25,
-      minEdgeThreshold: opts.minEdgeThreshold ?? 0.03,
+      minEdgeThreshold: opts.minEdgeThreshold ?? 0.01,
       sizingMode,
       flatSizeUsdc,
       lastUpdated: new Date(),
@@ -294,6 +294,15 @@ export async function setSizingMode(mode: "flat" | "kelly", flatSizeUsdc?: numbe
       ...(flatSizeUsdc != null ? { flatSizeUsdc } : {}),
       lastUpdated: new Date(),
     })
+    .where(eq(botStateTable.id, state.id));
+  return getBotState();
+}
+
+export async function setMinEdgeThreshold(threshold: number) {
+  const state = await ensureBotState();
+  await db
+    .update(botStateTable)
+    .set({ minEdgeThreshold: threshold, lastUpdated: new Date() })
     .where(eq(botStateTable.id, state.id));
   return getBotState();
 }

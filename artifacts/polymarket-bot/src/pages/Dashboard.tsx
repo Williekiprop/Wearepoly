@@ -82,6 +82,10 @@ export default function Dashboard() {
     if ((botData as any)?.sizingMode) setSizingModeLocal((botData as any).sizingMode);
   }, [(botData as any)?.sizingMode]);
 
+  const [thresholdInput, setThresholdInput] = useState(() => {
+    return String(((botData as any)?.minEdgeThreshold ?? 0.01) * 100);
+  });
+
   const handleStart = () => {
     mutations.start.mutate({
       data: {
@@ -89,8 +93,20 @@ export default function Dashboard() {
         startingBalance: parseFloat(startBalanceInput) || 4,
         sizingMode,
         flatSizeUsdc: 1.0,
+        minEdgeThreshold: parseFloat(thresholdInput) / 100 || 0.01,
       } as any
     });
+  };
+
+  const handleThresholdUpdate = async () => {
+    const val = parseFloat(thresholdInput) / 100;
+    if (isNaN(val) || val <= 0 || val > 50) return;
+    await fetch(`${import.meta.env.BASE_URL?.replace(/\/$/, "")}/api/bot/set-threshold`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ minEdgeThreshold: val }),
+    });
+    queryClient.invalidateQueries();
   };
 
   const handleProxyApply = () => {
@@ -468,6 +484,42 @@ export default function Dashboard() {
                       className="w-full bg-input border border-border rounded-md h-10 pl-7 pr-3 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary disabled:opacity-50"
                     />
                   </div>
+                </div>
+
+                {/* Edge Threshold Input */}
+                <div>
+                  <label className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block mb-2">
+                    Min Edge Threshold (%)
+                  </label>
+                  <div className="flex gap-1.5 items-center">
+                    <div className="relative flex-1">
+                      <input
+                        type="number"
+                        min="0.1"
+                        max="50"
+                        step="0.1"
+                        value={thresholdInput}
+                        onChange={(e) => setThresholdInput(e.target.value)}
+                        className="w-full bg-input border border-border rounded-md h-10 pl-3 pr-7 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary"
+                      />
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground font-mono text-xs">%</span>
+                    </div>
+                    {isRunning && (
+                      <button
+                        onClick={handleThresholdUpdate}
+                        className="shrink-0 h-10 px-3 rounded-md text-xs font-bold font-mono tracking-wide border bg-primary/10 text-primary border-primary/40 hover:bg-primary/20 transition-colors"
+                        title="Update threshold on the running bot"
+                      >
+                        SET
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[9px] font-mono text-muted-foreground/60 mt-1">
+                    Bot trades only when model edge ≥ this. Lower = more trades, higher = more selective.
+                    {botData && (
+                      <span className="text-primary/60"> Current: {(((botData as any).minEdgeThreshold ?? 0.01) * 100).toFixed(1)}%</span>
+                    )}
+                  </p>
                 </div>
               </div>
 

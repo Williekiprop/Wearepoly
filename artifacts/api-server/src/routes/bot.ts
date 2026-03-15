@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { getBotState, startBot, stopBot, resetBot, setSizingMode, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance } from "../lib/botEngine.js";
+import { getBotState, startBot, stopBot, resetBot, setSizingMode, setMinEdgeThreshold, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance } from "../lib/botEngine.js";
 import { hasProxy, setProxyUrl, getProxyDisplay, getGeoblockCooldownMs, resetGeoblockCooldown, testProxy, polyFetch } from "../lib/proxiedFetch.js";
 import { ethers } from "ethers";
 import * as crypto from "crypto";
@@ -24,6 +24,7 @@ function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
     lastSignal: state.lastSignal ?? null,
     sizingMode: state.sizingMode,
     flatSizeUsdc: state.flatSizeUsdc,
+    minEdgeThreshold: state.minEdgeThreshold,
     proxyEnabled: hasProxy(),
     proxyDisplay: getProxyDisplay(),
     geoblockCooldownMs,
@@ -87,6 +88,16 @@ router.post("/bot/stop", async (_req, res): Promise<void> => {
 
 router.post("/bot/reset", async (_req, res): Promise<void> => {
   const state = await resetBot();
+  res.json(formatState(state));
+});
+
+router.post("/bot/set-threshold", async (req, res): Promise<void> => {
+  const { minEdgeThreshold } = req.body as { minEdgeThreshold: number };
+  if (typeof minEdgeThreshold !== "number" || minEdgeThreshold < 0 || minEdgeThreshold > 1) {
+    res.status(400).json({ error: "minEdgeThreshold must be a number between 0 and 1" });
+    return;
+  }
+  const state = await setMinEdgeThreshold(minEdgeThreshold);
   res.json(formatState(state));
 });
 
