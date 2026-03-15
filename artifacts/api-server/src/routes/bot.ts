@@ -137,14 +137,15 @@ router.get("/bot/api-test", async (_req, res): Promise<void> => {
 
 /**
  * Browser-relay endpoints.
- * The dashboard polls GET /bot/pending-order; when an order is ready, the browser
- * POSTs it directly to Polymarket (from the user's VPN machine) and then calls
- * POST /bot/complete-order to record the result.
+ *
+ * GET  /bot/pending-order   – browser polls for the next queued order
+ * POST /bot/relay-submit    – browser posts signed order body here; server forwards to Polymarket
+ *                             (bypasses browser CSP/Cloudflare block; uses proxy if set)
+ * POST /bot/complete-order  – browser reports final success/failure result
  */
 router.get("/bot/pending-order", (_req, res): void => {
   const pending = dequeueBrowserOrder();
   if (!pending) { res.json({ pending: null }); return; }
-  // Return the full request payload + trade context so the browser can submit and report back
   res.json({
     pending: {
       id: pending.prepared.id,
@@ -156,6 +157,34 @@ router.get("/bot/pending-order", (_req, res): void => {
       context: { ...pending.tradeContext, botId: pending.botId },
     },
   });
+});
+
+/**
+ * Server-forward relay: browser sends the signed order to OUR server,
+ * server forwards to Polymarket via polyFetch (which uses the proxy if set).
+ * This bypasses Cloudflare browser-fingerprint blocks and Replit CSP restrictions.
+ */
+router.post("/bot/relay-submit", async (req, res): Promise<void> => {
+  const { url, method, headers: reqHeaders, body } = req.body as {
+    url: string;
+    method: string;
+    headers: Record<string, string>;
+    body: string;
+  };
+  if (!url || !body) { res.status(400).json({ error: "url and body required" }); return; }
+  try {
+    const upstream = await polyFetch(url, {
+      method: method ?? "POST",
+      headers: { "Content-Type": "application/json", ...reqHeaders },
+      body,
+      signal: AbortSignal.timeout(12000),
+    });
+    const text = await upstream.text();
+    res.status(upstream.status).set("Content-Type", "application/json").send(text);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(502).json({ error: msg });
+  }
 });
 
 router.post("/bot/complete-order", async (req, res): Promise<void> => {

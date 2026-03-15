@@ -53,37 +53,41 @@ export function useBrowserOrderRelay(isLive: boolean) {
     let clobStatus: string | undefined;   // "matched" = on-chain settled, "live" = still in order book
 
     try {
-      // POST directly to Polymarket from this browser (VPN-connected machine)
-      const orderBody = JSON.parse(data.pending.body);
-      console.log("[RELAY] Submitting order to:", data.pending.url);
-      console.log("[RELAY] Order body:", JSON.stringify(orderBody, null, 2));
-      const polyRes = await fetch(data.pending.url, {
+      // Route through our own server (/api/bot/relay-submit) instead of calling Polymarket
+      // directly from the browser — this bypasses Cloudflare browser-fingerprint blocks and
+      // Replit workspace CSP restrictions. The server forwards via polyFetch (proxy-aware).
+      console.log("[RELAY] Forwarding order via server relay to:", data.pending.url);
+      const relayRes = await fetch(`${API_BASE}/bot/relay-submit`, {
         method: "POST",
-        headers: data.pending.headers,
-        body: data.pending.body,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: data.pending.url,
+          method: data.pending.method,
+          headers: data.pending.headers,
+          body: data.pending.body,
+        }),
       });
-      const polyText = await polyRes.text();
+      const polyText = await relayRes.text();
       let polyJson: { orderID?: string; error?: string; errorMsg?: string; takingAmount?: string; makingAmount?: string; status?: string } = {};
       try { polyJson = JSON.parse(polyText); } catch { /* non-JSON */ }
 
-      console.log("[RELAY] Polymarket response:", polyRes.status, polyText.slice(0, 500));
-      if (polyRes.ok && polyJson.orderID) {
+      console.log("[RELAY] Server relay response:", relayRes.status, polyText.slice(0, 500));
+      if (relayRes.ok && polyJson.orderID) {
         orderId = polyJson.orderID;
         success = true;
-        // takingAmount = actual tokens received (BUY) or USDC received (SELL) from this fill cycle
         if (polyJson.takingAmount) actualShares = parseFloat(polyJson.takingAmount);
-        clobStatus = polyJson.status; // "matched" = settled on-chain; "live" = still in order book
+        clobStatus = polyJson.status;
         setRelayStatus({ state: "success", orderId });
         setTimeout(() => setRelayStatus({ state: "idle" }), 4000);
       } else {
-        errorMessage = `HTTP ${polyRes.status}: ${polyJson.error ?? polyJson.errorMsg ?? polyText}`;
+        errorMessage = `HTTP ${relayRes.status}: ${polyJson.error ?? polyJson.errorMsg ?? polyText}`;
         console.error("[RELAY] Order failed:", errorMessage);
         setRelayStatus({ state: "error", message: errorMessage });
         setTimeout(() => setRelayStatus({ state: "idle" }), 6000);
       }
     } catch (e) {
       errorMessage = e instanceof Error ? e.message : String(e);
-      console.error("[RELAY] Fetch exception:", errorMessage);
+      console.error("[RELAY] Exception:", errorMessage);
       setRelayStatus({ state: "error", message: errorMessage });
       setTimeout(() => setRelayStatus({ state: "idle" }), 6000);
     }

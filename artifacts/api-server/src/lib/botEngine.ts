@@ -55,6 +55,11 @@ interface PendingBrowserOrder {
 // so we never double-close the same position.
 const pendingSellTradeIds = new Set<number>();
 
+// Track which 5m window-end timestamps we've ALREADY attempted entry on.
+// Prevents re-queuing after a failed attempt within the same 5-minute window.
+// Cleared automatically when the window rolls over.
+const attemptedWindowEnds = new Set<number>();
+
 const browserOrderQueue: PendingBrowserOrder[] = [];
 
 /** Called by the API route: browser polls for the next pending order. */
@@ -460,8 +465,20 @@ async function runBotCycle(botId: number) {
       }
       const hasPendingBuy = browserOrderQueue.some(o => o.botId === botId && o.tradeContext.orderSide === "BUY");
       if (hasPendingBuy) {
-        console.log("[LIVE] Skipping — BUY already queued, awaiting browser relay");
+        console.log("[LIVE] Skipping — BUY already queued, awaiting relay");
         return;
+      }
+
+      // Only attempt entry ONCE per 5-minute window — prevents retry-spam after relay failure
+      if (attemptedWindowEnds.has(market5m.windowEnd)) {
+        console.log(`[LIVE] Already attempted window ${new Date(market5m.windowEnd * 1000).toISOString()} — waiting for next window`);
+        return;
+      }
+      attemptedWindowEnds.add(market5m.windowEnd);
+      // Prune old window entries (keep only last 5)
+      if (attemptedWindowEnds.size > 5) {
+        const sorted = [...attemptedWindowEnds].sort((a, b) => a - b);
+        for (let i = 0; i < sorted.length - 5; i++) attemptedWindowEnds.delete(sorted[i]);
       }
 
       const tokenId = direction === "YES" ? market5m.upTokenId : market5m.downTokenId;
