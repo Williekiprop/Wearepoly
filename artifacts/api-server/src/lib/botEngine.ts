@@ -179,12 +179,11 @@ export async function completeBrowserOrder(
   }
 }
 
-// How many 30s cycles to hold a test position before closing at market price
-const TEST_HOLD_CYCLES = 2; // 60 seconds
+const TEST_HOLD_MS = 30_000;  // 30 seconds minimum hold before closing a test position
 
-// How many 30s cycles to hold a LIVE position before selling back to market
-// 4 cycles = 2 minutes.  Gives edge time to realise without tying up capital forever.
-const LIVE_HOLD_CYCLES = 4; // 2 minutes
+// Minimum time to hold a LIVE position before considering an early exit.
+// 30s gives the trade a moment to breathe; natural resolution at window end is the primary exit.
+const LIVE_MIN_HOLD_MS = 30_000; // 30 seconds
 
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -773,7 +772,7 @@ async function closeMaturedTestPositions(
     .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
 
   const now = Date.now();
-  const holdMs = TEST_HOLD_CYCLES * 30_000;
+  const holdMs = TEST_HOLD_MS;
 
   for (const pos of openPositions) {
     const age = now - pos.timestamp.getTime();
@@ -869,7 +868,7 @@ async function closeMatureLivePositions(
 
   const now = Date.now();
   // Exit triggers (all time-based minimums; price-based targets take priority)
-  const MIN_HOLD_MS  = LIVE_HOLD_CYCLES * 30_000;    // 2 min: never exit before this
+  const MIN_HOLD_MS  = LIVE_MIN_HOLD_MS;    // 30s: never exit before this
   const MAX_HOLD_MS  = 30 * 60_000;                  // 30 min: always exit by this point
   const PROFIT_TARGET = 0.10;   // +10% price move from entry → take profit
   const STOP_LOSS     = -0.20;  // -20% price move from entry → cut loss
