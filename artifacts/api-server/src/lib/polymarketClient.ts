@@ -32,7 +32,7 @@ const GAMMA_API = "https://gamma-api.polymarket.com";
 const CLOB_API = "https://clob.polymarket.com";
 
 let eventCache: { events: PolymarketEvent[]; fetchedAt: number } | null = null;
-const CACHE_TTL = 60_000;
+const CACHE_TTL = 10_000;
 
 /**
  * Fetch active BTC events + their nested markets from Polymarket.

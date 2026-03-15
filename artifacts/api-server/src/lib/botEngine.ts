@@ -347,7 +347,7 @@ export async function resetBot() {
 
 function startPolling(botId: number) {
   stopPolling();
-  pollingInterval = setInterval(() => runBotCycle(botId), 30_000);
+  pollingInterval = setInterval(() => runBotCycle(botId), 10_000);
   runBotCycle(botId);
 }
 

@@ -23,7 +23,7 @@ export interface BtcPriceData {
 }
 
 let cache: { data: BtcPriceData; fetchedAt: number } | null = null;
-const CACHE_TTL = 10_000; // 10s — snappy updates in the dashboard
+const CACHE_TTL = 5_000; // 5s — snappy updates in the dashboard
 
 export async function getBtcPriceData(): Promise<BtcPriceData> {
   if (cache && Date.now() - cache.fetchedAt < CACHE_TTL) {
