@@ -513,10 +513,17 @@ async function runBotCycle(botId: number) {
           const currentHeldPrice = weBoughtUp ? upPrice : 1 - upPrice;   // real Polymarket bid
           const entryHeldPrice   = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
           const marketGain = currentHeldPrice - entryHeldPrice;
+          const dir = weBoughtUp ? "UP" : "DOWN";
+          const gainCents = (marketGain * 100).toFixed(1);
+          const tpCents   = (TAKE_PROFIT_MARKET_GAIN * 100).toFixed(0);
+          const gainSign  = marketGain >= 0 ? "+" : "";
+          console.log(
+            `[5M TEST] Holding ${dir} | market ${(entryHeldPrice*100).toFixed(1)}¢ → ` +
+            `${(currentHeldPrice*100).toFixed(1)}¢ (${gainSign}${gainCents}¢ of ${tpCents}¢ TP target)`
+          );
 
           if (marketGain >= TAKE_PROFIT_MARKET_GAIN) {
             const estPnl = pos.shares * marketGain;
-            const dir = weBoughtUp ? "UP" : "DOWN";
             console.log(
               `[5M TEST] Take-profit ${dir} | market +${(marketGain * 100).toFixed(1)}¢ ` +
               `(${(entryHeldPrice * 100).toFixed(1)}¢ → ${(currentHeldPrice * 100).toFixed(1)}¢) | ` +
