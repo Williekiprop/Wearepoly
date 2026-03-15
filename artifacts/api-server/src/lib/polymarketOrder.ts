@@ -331,9 +331,8 @@ export async function getClobTokenId(
 ): Promise<string | null> {
   try {
     const path = `/markets/${conditionId}`;
-    const headers = await buildApiHeaders("GET", path);
-    const res = await polyFetch(`${CLOB_API}${path}`, {
-      headers,
+    // CLOB market data is public — use plain fetch (no proxy, no auth required)
+    const res = await fetch(`${CLOB_API}${path}`, {
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) {

@@ -497,43 +497,56 @@ async function runBotCycle(botId: number) {
       .set({ currentMarketPrice: upPrice, lastSignal: signal, lastUpdated: new Date() })
       .where(eq(botStateTable.id, botId));
 
-    // ── Step 3a: Take-profit check (runs even in TOO_LATE / NO_TRADE) ──
+    // ── Step 3a: Take-profit check (both modes; runs even in TOO_LATE / NO_TRADE) ──
     // Must happen before the NO_TRADE early-return so late-window price moves
-    // are captured.  Selling at a real Polymarket market price is always valid.
-    if (freshState.mode === "test") {
-      const tpPositions = await db.select().from(tradesTable)
-        .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
+    // are captured.  For LIVE, only fires when the position is in the current window
+    // (prices from a resolved window no longer reflect token value).
+    {
+      const modeStr = freshState.mode.toUpperCase();
+      const holdMinMs = freshState.mode === "test" ? TEST_HOLD_MS : LIVE_MIN_HOLD_MS;
+      const openPositions = await db.select().from(tradesTable)
+        .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, freshState.mode)));
 
-      if (tpPositions.length > 0) {
-        const pos = tpPositions[0];
-        const heldMs = Date.now() - pos.timestamp.getTime();
+      if (openPositions.length > 0) {
+        const pos = openPositions[0];
 
-        if (heldMs >= TEST_HOLD_MS) {
-          const weBoughtUp = pos.direction === "YES";
-          const currentHeldPrice = weBoughtUp ? upPrice : 1 - upPrice;   // real Polymarket bid
-          const entryHeldPrice   = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
-          const marketGain = currentHeldPrice - entryHeldPrice;
-          const dir = weBoughtUp ? "UP" : "DOWN";
-          const gainCents = (marketGain * 100).toFixed(1);
-          const tpCents   = (TAKE_PROFIT_MARKET_GAIN * 100).toFixed(0);
-          const gainSign  = marketGain >= 0 ? "+" : "";
-          console.log(
-            `[5M TEST] Holding ${dir} | market ${(entryHeldPrice*100).toFixed(1)}¢ → ` +
-            `${(currentHeldPrice*100).toFixed(1)}¢ (${gainSign}${gainCents}¢ of ${tpCents}¢ TP target)`
-          );
+        // LIVE: only apply TP when the position belongs to the current 5m window
+        const posInfo = decode5mMarketId(pos.marketId ?? "");
+        const inCurrentWindow = freshState.mode === "test" || (posInfo && posInfo.windowEnd === market5m.windowEnd);
 
-          if (marketGain >= TAKE_PROFIT_MARKET_GAIN) {
-            const estPnl = pos.shares * marketGain;
+        if (inCurrentWindow && !pendingSellTradeIds.has(pos.id)) {
+          const heldMs = Date.now() - pos.timestamp.getTime();
+
+          if (heldMs >= holdMinMs) {
+            const weBoughtUp = pos.direction === "YES";
+            const currentHeldPrice = weBoughtUp ? upPrice : 1 - upPrice;
+            const entryHeldPrice   = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
+            const marketGain = currentHeldPrice - entryHeldPrice;
+            const dir = weBoughtUp ? "UP" : "DOWN";
+            const gainCents = (marketGain * 100).toFixed(1);
+            const tpCents   = (TAKE_PROFIT_MARKET_GAIN * 100).toFixed(0);
+            const gainSign  = marketGain >= 0 ? "+" : "";
             console.log(
-              `[5M TEST] Take-profit ${dir} | market +${(marketGain * 100).toFixed(1)}¢ ` +
-              `(${(entryHeldPrice * 100).toFixed(1)}¢ → ${(currentHeldPrice * 100).toFixed(1)}¢) | ` +
-              `P&L +$${estPnl.toFixed(4)}`
+              `[5M ${modeStr}] Holding ${dir} | market ${(entryHeldPrice*100).toFixed(1)}¢ → ` +
+              `${(currentHeldPrice*100).toFixed(1)}¢ (${gainSign}${gainCents}¢ of ${tpCents}¢ TP target)`
             );
-            await closeTestPositionEarly(botId, pos, upPrice);
-            // Do NOT re-enter immediately — wait for the price to pull back to a
-            // better level.  The normal cycle will open a new position next tick
-            // once the edge calculation says the price is attractive again.
-            return;
+
+            if (marketGain >= TAKE_PROFIT_MARKET_GAIN) {
+              const estPnl = pos.shares * marketGain;
+              console.log(
+                `[5M ${modeStr}] Take-profit ${dir} | market +${(marketGain * 100).toFixed(1)}¢ ` +
+                `(${(entryHeldPrice * 100).toFixed(1)}¢ → ${(currentHeldPrice * 100).toFixed(1)}¢) | ` +
+                `est P&L +$${estPnl.toFixed(4)}`
+              );
+              if (freshState.mode === "test") {
+                await closeTestPositionEarly(botId, pos, upPrice);
+              } else {
+                const preloadedTid = pos.direction === "YES" ? market5m.upTokenId : market5m.downTokenId;
+                await closeLivePositionEarly(botId, pos, upPrice, market5m.conditionId, "TAKE_PROFIT", preloadedTid);
+              }
+              // Do NOT re-enter immediately — wait for price to pull back.
+              return;
+            }
           }
         }
       }
@@ -582,9 +595,26 @@ async function runBotCycle(botId: number) {
         .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "live")));
       if (openLivePositions.length > 0) {
         const pos = openLivePositions[0];
-        const info = decode5mMarketId(pos.marketId ?? "");
-        const secsLeft = info ? Math.max(0, info.windowEnd - Math.floor(Date.now() / 1000)) : 0;
-        console.log(`[LIVE] Holding ${pos.direction === "YES" ? "UP" : "DOWN"} | window closes in ${secsLeft}s`);
+        // If SELL already queued (TP or flip), wait for relay to complete
+        if (pendingSellTradeIds.has(pos.id)) {
+          console.log("[LIVE] SELL already queued — waiting for relay");
+          return;
+        }
+        const posInfo = decode5mMarketId(pos.marketId ?? "");
+        const inCurrentWindow = posInfo && posInfo.windowEnd === market5m.windowEnd;
+        const heldMs = Date.now() - pos.timestamp.getTime();
+        const signalFlipped = pos.direction !== direction;
+
+        if (inCurrentWindow && signalFlipped && heldMs >= LIVE_MIN_HOLD_MS) {
+          // Signal reversed — exit current position and allow re-entry in same window
+          console.log(`[LIVE] Flip signal (${pos.direction}→${direction}) after ${Math.round(heldMs/1000)}s — queuing SELL`);
+          const preloadedTid = pos.direction === "YES" ? market5m.upTokenId : market5m.downTokenId;
+          const flipped = await closeLivePositionEarly(botId, pos, upPrice, market5m.conditionId, "FLIP", preloadedTid);
+          if (flipped) attemptedWindowEnds.delete(market5m.windowEnd); // allow re-entry this window
+        } else if (inCurrentWindow && signalFlipped) {
+          console.log(`[LIVE] Flip signal (${pos.direction}→${direction}) but held only ${Math.round(heldMs/1000)}s — waiting for ${LIVE_MIN_HOLD_MS/1000}s min`);
+        }
+        // else: holding same direction (log already shown in step 3a TP check)
         return;
       }
       const hasPendingBuy = browserOrderQueue.some(o => o.botId === botId && o.tradeContext.orderSide === "BUY");
@@ -981,122 +1011,81 @@ async function forceCloseOpenTestPositions(botId: number) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// LIVE MODE — Close mature positions by placing SELL orders
+// LIVE MODE — Early exit (take-profit or signal flip) via browser relay SELL
 // ──────────────────────────────────────────────────────────────────────────────
 
-async function closeMatureLivePositions(
+async function closeLivePositionEarly(
   botId: number,
+  pos: typeof tradesTable.$inferSelect,
   currentYesPrice: number,
   conditionId: string | null,
-): Promise<void> {
-  const openLive = await db.select().from(tradesTable)
-    .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "live")));
+  reason: "TAKE_PROFIT" | "FLIP",
+  preloadedTokenId?: string,
+): Promise<boolean> {
+  if (!conditionId) {
+    console.warn("[LIVE] Cannot close early — no conditionId");
+    return false;
+  }
+  if (pendingSellTradeIds.has(pos.id)) return false;
 
-  const now = Date.now();
-  // Exit triggers (all time-based minimums; price-based targets take priority)
-  const MIN_HOLD_MS  = LIVE_MIN_HOLD_MS;    // 30s: never exit before this
-  const MAX_HOLD_MS  = 30 * 60_000;                  // 30 min: always exit by this point
-  const PROFIT_TARGET = 0.10;   // +10% price move from entry → take profit
-  const STOP_LOSS     = -0.20;  // -20% price move from entry → cut loss
+  const sellPrice  = pos.direction === "YES" ? currentYesPrice : 1 - currentYesPrice;
+  const entryPrice = pos.direction === "YES" ? pos.marketPrice  : 1 - pos.marketPrice;
 
-  for (const pos of openLive) {
-    const age = now - pos.timestamp.getTime();
-    if (pendingSellTradeIds.has(pos.id)) continue;    // already queued
+  const tokenId = preloadedTokenId ?? await getClobTokenId(conditionId, pos.direction);
+  if (!tokenId) {
+    console.error(`[LIVE] Cannot get tokenId for early ${reason} exit`);
+    return false;
+  }
 
-    if (pos.shares < 0.1) {
-      // "live" (un-matched) order — tokens not in wallet; cancel instead of selling
-      await db.update(tradesTable).set({ status: "cancelled", resolvedAt: new Date() }).where(eq(tradesTable.id, pos.id));
-      console.log(`[LIVE] Trade #${pos.id} had 0 shares (unmatched), marking cancelled`);
-      continue;
-    }
+  try {
+    const prepared = await prepareOrderForBrowser({
+      tokenId,
+      side: "SELL",
+      price: sellPrice,
+      sizeUsdc: pos.shares * sellPrice,
+      sizeTokens: pos.shares,
+    });
 
-    // Determine current sell price vs entry price
-    const sellPrice  = pos.direction === "YES" ? currentYesPrice : 1 - currentYesPrice;
-    const entryPrice = pos.direction === "YES" ? pos.marketPrice  : 1 - pos.marketPrice;
-    const priceChange = entryPrice > 0 ? (sellPrice - entryPrice) / entryPrice : 0;
-
-    // Evaluate exit conditions
-    const hitMinHold    = age >= MIN_HOLD_MS;
-    const hitMaxHold    = age >= MAX_HOLD_MS;
-    const hitProfitTgt  = hitMinHold && priceChange >= PROFIT_TARGET;
-    const hitStopLoss   = hitMinHold && priceChange <= STOP_LOSS;
-
-    if (!hitProfitTgt && !hitStopLoss && !hitMaxHold) {
-      // Not ready to exit — log current status every cycle for visibility
-      const pctChange = (priceChange * 100).toFixed(1);
-      const pctTarget = (PROFIT_TARGET * 100).toFixed(0);
-      console.log(
-        `[LIVE] Holding trade #${pos.id} | age ${Math.round(age/1000)}s` +
-        ` | entry ${(entryPrice*100).toFixed(2)}¢ → now ${(sellPrice*100).toFixed(2)}¢` +
-        ` (${priceChange >= 0 ? "+" : ""}${pctChange}%) | target ≥+${pctTarget}%`
-      );
-      continue;
-    }
-
-    const exitReason = hitProfitTgt ? "PROFIT_TARGET" : hitStopLoss ? "STOP_LOSS" : "MAX_HOLD";
-    console.log(
-      `[LIVE] Exiting trade #${pos.id} — ${exitReason}` +
-      ` | price ${(entryPrice*100).toFixed(2)}¢ → ${(sellPrice*100).toFixed(2)}¢` +
-      ` (${priceChange >= 0 ? "+" : ""}${(priceChange*100).toFixed(1)}%)`
-    );
-
-    if (!conditionId) {
-      console.warn("[LIVE] Cannot close position — no conditionId available");
-      continue;
-    }
-
-    const tokenId = await getClobTokenId(conditionId, pos.direction);
-    if (!tokenId) {
-      console.error(`[LIVE] Cannot get tokenId for SELL of ${pos.direction}`);
-      continue;
-    }
-
-    // Prepare SELL order using exact shares held
-    try {
-      const prepared = await prepareOrderForBrowser({
+    pendingSellTradeIds.add(pos.id);
+    browserOrderQueue.push({
+      prepared,
+      botId,
+      tradeContext: {
+        orderSide: "SELL",
+        tradeId: pos.id,
         tokenId,
-        side: "SELL",
-        price: sellPrice,
-        sizeUsdc: pos.shares * sellPrice,
-        sizeTokens: pos.shares,
-      });
+        entryPrice,
+        direction: pos.direction,
+        marketPrice: currentYesPrice,
+        estimatedProb: currentYesPrice,
+        edge: 0,
+        kellyScaledPct: 0,
+        positionSize: pos.positionSize,
+        actualSizeUsdc: 0,
+        shares: pos.shares,
+        priceImpact: 0,
+        btcPrice: 0,
+        marketId: pos.marketId,
+      },
+      queuedAt: Date.now(),
+    });
 
-      pendingSellTradeIds.add(pos.id);
-      browserOrderQueue.push({
-        prepared,
-        botId,
-        tradeContext: {
-          orderSide: "SELL",
-          tradeId: pos.id,
-          tokenId,
-          entryPrice,
-          direction: pos.direction,
-          marketPrice: currentYesPrice,
-          estimatedProb: currentYesPrice,
-          edge: 0,
-          kellyScaledPct: 0,
-          positionSize: pos.positionSize,
-          actualSizeUsdc: 0, // SELL: balance is synced from chain, not deducted locally
-          shares: pos.shares,
-          priceImpact: 0,
-          btcPrice: 0,
-          marketId: pos.marketId,
-        },
-        queuedAt: Date.now(),
-      });
+    const dir = pos.direction === "YES" ? "UP" : "DOWN";
+    const gainCents = ((sellPrice - entryPrice) * 100).toFixed(1);
+    const sign = sellPrice >= entryPrice ? "+" : "";
+    console.log(
+      `[LIVE] Early exit ${reason} ${dir} | ${(entryPrice*100).toFixed(1)}¢ → ${(sellPrice*100).toFixed(1)}¢ (${sign}${gainCents}¢) | ` +
+      `queued SELL ${pos.shares.toFixed(2)} tokens`
+    );
+    await db.update(botStateTable).set({
+      lastSignal: `LIVE SELL ${dir} — ${reason} @ ${(sellPrice * 100).toFixed(1)}¢`,
+      lastUpdated: new Date(),
+    }).where(eq(botStateTable.id, botId));
 
-      const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
-      if (state) {
-        await db.update(botStateTable).set({
-          lastSignal: `LIVE SELL ${pos.direction} — closing ${pos.shares.toFixed(2)} shares @ ${(sellPrice * 100).toFixed(1)}¢`,
-          lastUpdated: new Date(),
-        }).where(eq(botStateTable.id, botId));
-      }
-
-      console.log(`[LIVE] Queued SELL for trade #${pos.id}: ${pos.shares.toFixed(2)} ${pos.direction} tokens @ ${(sellPrice * 100).toFixed(1)}¢ (held ${Math.round(age / 1000)}s)`);
-    } catch (err) {
-      console.error(`[LIVE] Failed to prepare SELL for trade #${pos.id}:`, err);
-    }
+    return true;
+  } catch (err) {
+    console.error(`[LIVE] Failed to prepare early exit SELL:`, err);
+    return false;
   }
 }
 
