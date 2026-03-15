@@ -270,7 +270,7 @@ export async function getWalletBalance(): Promise<number | null> {
   try {
     const wallet = getWallet();
     const signPath = `/balance-allowance`; // HMAC signs base path only (no query string)
-    const fullPath = `/balance-allowance?asset_type=USDC&signature_type=0`;
+    const fullPath = `/balance-allowance?asset_type=COLLATERAL&signature_type=0`;
     const headers = await buildApiHeaders("GET", signPath);
     const res = await polyFetch(`${CLOB_API}${fullPath}`, {
       headers,
