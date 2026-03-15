@@ -18,7 +18,7 @@ import { eq, and } from "drizzle-orm";
 import { calcKelly, simulatePriceImpact } from "./lmsr.js";
 import { getBtcPriceData, estimate5mUpProb } from "./btcPrice.js";
 import { fetchCurrent5mMarket, getConnectionStatus, type FiveMinMarket } from "./polymarketClient.js";
-import { placeOrder, prepareOrderForBrowser, getClobTokenId, getWalletBalance, type PreparedBrowserOrder } from "./polymarketOrder.js";
+import { placeOrder, prepareOrderForBrowser, getClobTokenId, getWalletBalance, redeemWinningPositions, type PreparedBrowserOrder } from "./polymarketOrder.js";
 import { hasProxy, setProxyUrl, markProxyGeoblocked } from "./proxiedFetch.js";
 
 const B_PARAM = 100;
@@ -461,8 +461,14 @@ async function runBotCycle(botId: number) {
     let positionSize = 0;
     let shares = 0;
 
+    // Hard cap: skip if market is already too one-sided in either direction.
+    // If UP=85¢ the market has priced in the outcome — buying DOWN at 15¢ is just as
+    // risky as buying UP at 85¢, because a few seconds can't reverse a near-certain result.
+    const MAX_MARKET_CERTAINTY = 0.75; // block when either side is above this
+    const priceTooCertain = Math.max(upPrice, downPrice) > MAX_MARKET_CERTAINTY;
+
     const minBalance = freshState.sizingMode === "flat" ? freshState.flatSizeUsdc : 0.5;
-    if (!tooLate && edge >= freshState.minEdgeThreshold && freshState.balance >= minBalance) {
+    if (!tooLate && !priceTooCertain && edge >= freshState.minEdgeThreshold && freshState.balance >= minBalance) {
       signal = isBuyUp ? "BUY_YES" : "BUY_NO";
 
       if (freshState.sizingMode === "flat") {
@@ -485,7 +491,10 @@ async function runBotCycle(botId: number) {
     const secStr   = market5m.secondsRemaining > 0 ? `${market5m.secondsRemaining}s left` : "RESOLVED";
     const chg1m    = btcData.change1m >= 0 ? `+${btcData.change1m.toFixed(3)}%` : `${btcData.change1m.toFixed(3)}%`;
     if (signal === "NO_TRADE") {
-      const reason = tooLate ? "TOO_LATE" : `edge ${edgePct}% < threshold ${(freshState.minEdgeThreshold*100).toFixed(1)}%`;
+      const certainSide = upPrice > downPrice ? `UP=${(upPrice*100).toFixed(1)}¢` : `DOWN=${(downPrice*100).toFixed(1)}¢`;
+      const reason = tooLate ? "TOO_LATE"
+        : priceTooCertain ? `PRICE_CAP (${certainSide} > ${MAX_MARKET_CERTAINTY*100}¢ max)`
+        : `edge ${edgePct}% < threshold ${(freshState.minEdgeThreshold*100).toFixed(1)}%`;
       console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} | ${reason} | ${secStr}`);
     } else {
       const dir = isBuyUp ? "BUY_UP" : "BUY_DOWN";
@@ -753,12 +762,12 @@ async function resolve5mLivePositions(botId: number) {
       const upPrice = upToken?.price ?? 0.5;
       const downPrice = downToken?.price ?? 0.5;
 
-      // Primary: official winner flag. Fallback: price ≥ 0.90 after window closed ≥ 60s
+      // Primary: official winner flag. Fallback: price ≥ 0.85 after window closed ≥ 30s
       // (Polymarket's oracle can lag 2-5 min; prices already reflect the winner by then)
       const secsSinceClose = nowSec - info.windowEnd;
-      const priceResolutionOk = secsSinceClose >= 60;
-      const upWon  = upToken?.winner  === true || (priceResolutionOk && upPrice  >= 0.90);
-      const downWon = downToken?.winner === true || (priceResolutionOk && downPrice >= 0.90);
+      const priceResolutionOk = secsSinceClose >= 30;
+      const upWon  = upToken?.winner  === true || (priceResolutionOk && upPrice  >= 0.85);
+      const downWon = downToken?.winner === true || (priceResolutionOk && downPrice >= 0.85);
 
       if (!upWon && !downWon) {
         console.log(`[LIVE 5M] Market not yet resolved (closed=${clobData.closed}, UP=${(upPrice*100).toFixed(1)}¢, DOWN=${(downPrice*100).toFixed(1)}¢, ${secsSinceClose}s since close) — waiting`);
@@ -789,8 +798,9 @@ async function resolve5mLivePositions(botId: number) {
         status: "closed", exitPrice: exitValue, pnl, resolvedAt: new Date(),
       }).where(eq(tradesTable.id, pos.id));
 
+      const creditedBalance = st.balance + returnedCapital;
       await db.update(botStateTable).set({
-        balance: st.balance + returnedCapital,
+        balance: creditedBalance,
         winningTrades: weWon ? st.winningTrades + 1 : st.winningTrades,
         losingTrades: weWon ? st.losingTrades : st.losingTrades + 1,
         totalPnl: st.totalPnl + pnl,
@@ -801,12 +811,37 @@ async function resolve5mLivePositions(botId: number) {
       const result = weWon ? "WON" : "LOST";
       console.log(`[LIVE 5M] ${result} ${direction} | shares=${effectiveShares.toFixed(2)} P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
 
-      // Sync actual on-chain wallet balance — overrides computed balance above
+      // If we won, attempt on-chain CTF redemption immediately so USDC returns
+      if (weWon) {
+        console.log(`[LIVE 5M] Claiming winnings on-chain for ${info.conditionId.substring(0, 10)}...`);
+        // Fire-and-forget: don't block resolution of other positions
+        redeemWinningPositions(info.conditionId).then((ok) => {
+          if (ok) {
+            // Redemption succeeded — sync the updated on-chain balance
+            getWalletBalance().then((b) => {
+              if (b !== null && b > 0) {
+                db.update(botStateTable).set({ balance: Math.max(b, creditedBalance), lastUpdated: new Date() })
+                  .where(eq(botStateTable.id, botId))
+                  .then(() => console.log(`[LIVE 5M] Post-redeem wallet: $${b.toFixed(2)}`))
+                  .catch(() => {});
+              }
+            }).catch(() => {});
+          }
+        }).catch(() => {});
+      }
+
+      // Sync on-chain balance — but NEVER let it lower the DB balance below our
+      // computed credit (prevents redemption-pending state from looking like a loss).
       const walletBal = await getWalletBalance();
       if (walletBal !== null && walletBal >= 0) {
-        await db.update(botStateTable).set({ balance: walletBal, lastUpdated: new Date() })
+        const effectiveBal = Math.max(walletBal, creditedBalance);
+        await db.update(botStateTable).set({ balance: effectiveBal, lastUpdated: new Date() })
           .where(eq(botStateTable.id, botId));
-        console.log(`[LIVE 5M] Wallet synced: $${walletBal.toFixed(2)}`);
+        if (walletBal < creditedBalance) {
+          console.log(`[LIVE 5M] Redemption pending — using credited $${creditedBalance.toFixed(2)} (on-chain: $${walletBal.toFixed(2)})`);
+        } else {
+          console.log(`[LIVE 5M] Wallet synced: $${walletBal.toFixed(2)}`);
+        }
       }
     } catch (err) {
       console.error(`[LIVE 5M] resolve error for trade #${pos.id}:`, err);
@@ -1104,7 +1139,11 @@ async function executeLiveTrade(
 ): Promise<{ geoblocked: boolean }> {
   const { direction, marketPrice, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
 
-  const orderSize = Math.max(positionSize, MIN_LIVE_ORDER_USDC);
+  // limitPrice must be computed first — needed for 5-token minimum calculation
+  const limitPrice = direction === "YES" ? marketPrice : 1 - marketPrice;
+  // Polymarket CLOB minimum: 5 tokens per order. Enforce by bumping USDC accordingly.
+  const minForFiveTokens = Math.ceil(5 * limitPrice * 100) / 100;
+  const orderSize = Math.max(positionSize, MIN_LIVE_ORDER_USDC, minForFiveTokens);
 
   if (orderSize > state.balance) {
     console.log(`[LIVE] Skipping — order size $${orderSize.toFixed(2)} > balance $${state.balance.toFixed(2)}`);
@@ -1119,7 +1158,6 @@ async function executeLiveTrade(
     return { geoblocked: false };
   }
 
-  const limitPrice = direction === "YES" ? marketPrice : 1 - marketPrice;
   const trueYesProb = Math.min(0.95, Math.max(0.05, marketPrice + edge));
 
   // Helper: build tradeContext using the actual USDC from a prepared order

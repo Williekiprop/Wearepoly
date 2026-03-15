@@ -499,6 +499,112 @@ async function erc20BalanceOf(token: string, holder: string): Promise<number | n
   return null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CTF Redemption — claim winning tokens back to USDC after market resolution
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"; // ConditionalTokens on Polygon
+const CTF_REDEEM_ABI = [
+  "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] calldata indexSets) external",
+];
+const SAFE_EXEC_ABI = [
+  "function execTransaction(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes memory signatures) external payable returns (bool success)",
+  "function nonce() external view returns (uint256)",
+  "function getTransactionHash(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, uint256 _nonce) external view returns (bytes32)",
+];
+
+/**
+ * Attempt to redeem winning CTF tokens back to USDC.e via the proxy Safe wallet.
+ * Executes a Safe transaction (signed by the EOA owner) to call
+ * ConditionalTokens.redeemPositions([1,2]) — both indexSets so we always
+ * capture the winning side without needing to know which one won.
+ *
+ * Requires MATIC in the EOA wallet for gas. Silently fails if unavailable
+ * (Polymarket auto-redeems within a few minutes anyway).
+ */
+export async function redeemWinningPositions(conditionId: string): Promise<boolean> {
+  try {
+    const proxyAddress = getProxyAddress();
+    if (!proxyAddress) {
+      console.warn("[REDEEM] No proxy address — skipping on-chain redemption");
+      return false;
+    }
+
+    const wallet = getWallet();
+    // Use multiple RPCs for resilience
+    const POLYGON_RPCS = [
+      "https://polygon-bor-rpc.publicnode.com",
+      "https://polygon-rpc.com",
+    ];
+
+    let provider: ethers.JsonRpcProvider | null = null;
+    for (const rpc of POLYGON_RPCS) {
+      try {
+        provider = new ethers.JsonRpcProvider(rpc);
+        await provider.getBlockNumber(); // smoke test
+        break;
+      } catch {
+        provider = null;
+      }
+    }
+    if (!provider) {
+      console.warn("[REDEEM] All Polygon RPCs failed — skipping redemption");
+      return false;
+    }
+
+    const signer = wallet.connect(provider);
+
+    // Encode the redeemPositions call data
+    const ctfIface = new ethers.Interface(CTF_REDEEM_ABI);
+    const callData = ctfIface.encodeFunctionData("redeemPositions", [
+      USDCE_POLYGON,
+      ethers.ZeroHash, // parentCollectionId = bytes32(0) for top-level positions
+      conditionId,
+      [1n, 2n], // YES (indexSet=1) and NO (indexSet=2) — winning one returns USDC, losing returns 0
+    ]);
+
+    const safe = new ethers.Contract(proxyAddress, SAFE_EXEC_ABI, signer);
+
+    // Get current nonce of the Safe
+    const nonce: bigint = await safe.nonce();
+
+    // Ask the Safe for the EIP-712 transaction hash
+    const safeTxHash: string = await safe.getTransactionHash(
+      CTF_ADDRESS,    // to
+      0n,             // value
+      callData,       // data
+      0,              // operation: CALL
+      0n,             // safeTxGas (let node estimate)
+      0n,             // baseGas
+      0n,             // gasPrice
+      ethers.ZeroAddress, // gasToken
+      ethers.ZeroAddress, // refundReceiver
+      nonce,
+    );
+
+    // Sign the Safe transaction hash raw (no Ethereum personal_sign prefix)
+    const rawSig = signer.signingKey.sign(safeTxHash);
+    const signature = ethers.concat([rawSig.r, rawSig.s, ethers.toBeHex(rawSig.v, 1)]);
+
+    console.log(`[REDEEM] Submitting CTF redeemPositions for ${conditionId.substring(0, 10)}...`);
+    const tx = await safe.execTransaction(
+      CTF_ADDRESS, 0n, callData,
+      0, 0n, 0n, 0n,
+      ethers.ZeroAddress, ethers.ZeroAddress,
+      signature,
+      { gasLimit: 400_000n },
+    );
+    console.log(`[REDEEM] Tx submitted: ${tx.hash}`);
+    const receipt = await tx.wait(1);
+    console.log(`[REDEEM] Confirmed block ${receipt.blockNumber} — USDC returned to wallet`);
+    return true;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[REDEEM] On-chain redemption failed (auto-redeem will occur later): ${msg.substring(0, 120)}`);
+    return false;
+  }
+}
+
 /**
  * Get the effective USDC balance available for Polymarket trading.
  *
