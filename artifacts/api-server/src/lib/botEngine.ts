@@ -720,12 +720,24 @@ async function resolve5mLivePositions(botId: number) {
       const upToken = clobData.tokens?.find(t => t.outcome.toLowerCase() === "up");
       const downToken = clobData.tokens?.find(t => t.outcome.toLowerCase() === "down");
 
-      const upWon = upToken?.winner === true;
-      const downWon = downToken?.winner === true;
+      const upPrice = upToken?.price ?? 0.5;
+      const downPrice = downToken?.price ?? 0.5;
+
+      // Primary: official winner flag. Fallback: price ≥ 0.90 after window closed ≥ 60s
+      // (Polymarket's oracle can lag 2-5 min; prices already reflect the winner by then)
+      const secsSinceClose = nowSec - info.windowEnd;
+      const priceResolutionOk = secsSinceClose >= 60;
+      const upWon  = upToken?.winner  === true || (priceResolutionOk && upPrice  >= 0.90);
+      const downWon = downToken?.winner === true || (priceResolutionOk && downPrice >= 0.90);
 
       if (!upWon && !downWon) {
-        console.log(`[LIVE 5M] Market not yet resolved (closed=${clobData.closed}) — waiting`);
+        console.log(`[LIVE 5M] Market not yet resolved (closed=${clobData.closed}, UP=${(upPrice*100).toFixed(1)}¢, DOWN=${(downPrice*100).toFixed(1)}¢, ${secsSinceClose}s since close) — waiting`);
         continue;
+      }
+
+      const resolvedViaPrice = !upToken?.winner && !downToken?.winner;
+      if (resolvedViaPrice) {
+        console.log(`[LIVE 5M] Resolving via price fallback (UP=${(upPrice*100).toFixed(1)}¢ DOWN=${(downPrice*100).toFixed(1)}¢, ${secsSinceClose}s since close)`);
       }
 
       const weBoughtUp = pos.direction === "YES";
