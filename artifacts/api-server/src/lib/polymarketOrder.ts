@@ -288,24 +288,68 @@ export async function cancelOrder(orderId: string): Promise<boolean> {
   }
 }
 
+// USDC.e (bridged USDC) contract on Polygon — what Polymarket holds for trading
+const USDCE_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+// Native USDC on Polygon (fallback)
+const USDC_POLYGON  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
+// Public Polygon RPC endpoints (tried in order)
+const POLYGON_RPCS  = [
+  "https://rpc-mainnet.matic.quiknode.pro",
+  "https://1rpc.io/matic",
+  "https://rpc.ankr.com/polygon",
+];
+
 /**
- * Get real wallet USDC balance from CLOB API.
+ * Query ERC-20 balanceOf(address) via JSON-RPC on Polygon.
+ */
+async function erc20BalanceOf(token: string, holder: string): Promise<number | null> {
+  const data = "0x70a08231" + holder.slice(2).toLowerCase().padStart(64, "0");
+  for (const rpc of POLYGON_RPCS) {
+    try {
+      const res = await fetch(rpc, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [{ to: token, data }, "latest"], id: 1 }),
+        signal: AbortSignal.timeout(6000),
+      });
+      const json = await res.json() as { result?: string };
+      if (json.result && json.result !== "0x") {
+        return parseInt(json.result, 16) / 1e6; // USDC has 6 decimals
+      }
+    } catch { /* try next RPC */ }
+  }
+  return null;
+}
+
+/**
+ * Get the effective USDC balance available for Polymarket trading.
+ *
+ * Polymarket stores USDC.e in the proxy wallet with max approval to the
+ * CTF Exchange — so the on-chain proxy balance is the true trading budget.
+ * The CLOB /balance-allowance endpoint reports "deposited into exchange" (0
+ * when using wallet-based flow), so we read on-chain balance directly.
  */
 export async function getWalletBalance(): Promise<number | null> {
   try {
-    const sigType = getSignatureType();
     const proxyAddress = getProxyAddress();
-    const signPath = `/balance-allowance`; // HMAC signs base path only (no query string)
-    // funder = proxy wallet (the address that holds USDC on Polymarket)
+    const holder = proxyAddress ?? (await getWallet().getAddress());
+
+    // Try USDC.e first (Polymarket's primary collateral on Polygon)
+    const usdce = await erc20BalanceOf(USDCE_POLYGON, holder);
+    if (usdce !== null && usdce > 0) return usdce;
+
+    // Fall back to native USDC
+    const usdc = await erc20BalanceOf(USDC_POLYGON, holder);
+    if (usdc !== null) return usdc;
+
+    // Last resort: CLOB balance-allowance API
+    const sigType = getSignatureType();
     const funderParam = proxyAddress ? `&funder=${proxyAddress}` : "";
     const fullPath = `/balance-allowance?asset_type=COLLATERAL&signature_type=${sigType}${funderParam}`;
-    const headers = await buildApiHeaders("GET", signPath);
-    const res = await polyFetch(`${CLOB_API}${fullPath}`, {
-      headers,
-      signal: AbortSignal.timeout(8000),
-    });
+    const headers = await buildApiHeaders("GET", `/balance-allowance`);
+    const res = await polyFetch(`${CLOB_API}${fullPath}`, { headers, signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
-    const data = await res.json() as { balance?: string; allowance?: string };
+    const data = await res.json() as { balance?: string };
     return data.balance !== undefined ? parseFloat(data.balance) : null;
   } catch {
     return null;
