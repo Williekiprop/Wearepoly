@@ -181,6 +181,13 @@ export async function completeBrowserOrder(
 
 const TEST_HOLD_MS = 30_000;  // 30 seconds minimum hold before closing a test position
 
+// Take-profit: if the current Polymarket market price of our held tokens has
+// risen ≥ this many cents above our entry price, sell and lock in the gain.
+// This is a REAL executable trade (CLOB limit order at the market bid).
+// 15¢ on ~2 shares ≈ +$0.30 per trade.  After exit we immediately re-enter
+// the same direction if there's still edge and time remaining.
+const TAKE_PROFIT_MARKET_GAIN = 0.15;
+
 // Minimum time to hold a LIVE position before considering an early exit.
 // 30s gives the trade a moment to breathe; natural resolution at window end is the primary exit.
 const LIVE_MIN_HOLD_MS = 30_000; // 30 seconds
@@ -490,12 +497,58 @@ async function runBotCycle(botId: number) {
       .set({ currentMarketPrice: upPrice, lastSignal: signal, lastUpdated: new Date() })
       .where(eq(botStateTable.id, botId));
 
+    // ── Step 3a: Take-profit check (runs even in TOO_LATE / NO_TRADE) ──
+    // Must happen before the NO_TRADE early-return so late-window price moves
+    // are captured.  Selling at a real Polymarket market price is always valid.
+    if (freshState.mode === "test") {
+      const tpPositions = await db.select().from(tradesTable)
+        .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
+
+      if (tpPositions.length > 0) {
+        const pos = tpPositions[0];
+        const heldMs = Date.now() - pos.timestamp.getTime();
+
+        if (heldMs >= TEST_HOLD_MS) {
+          const weBoughtUp = pos.direction === "YES";
+          const currentHeldPrice = weBoughtUp ? upPrice : 1 - upPrice;   // real Polymarket bid
+          const entryHeldPrice   = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
+          const marketGain = currentHeldPrice - entryHeldPrice;
+
+          if (marketGain >= TAKE_PROFIT_MARKET_GAIN) {
+            const estPnl = pos.shares * marketGain;
+            const dir = weBoughtUp ? "UP" : "DOWN";
+            console.log(
+              `[5M TEST] Take-profit ${dir} | market +${(marketGain * 100).toFixed(1)}¢ ` +
+              `(${(entryHeldPrice * 100).toFixed(1)}¢ → ${(currentHeldPrice * 100).toFixed(1)}¢) | ` +
+              `est P&L +$${estPnl.toFixed(4)}`
+            );
+            await closeTestPositionEarly(botId, pos, upPrice);
+
+            // Re-enter same direction if there's still a signal and time left
+            if (!tooLate && signal !== "NO_TRADE" && positionSize >= 1.0) {
+              const [afterTp] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+              if (afterTp && afterTp.balance >= 1.0) {
+                const reSize   = Math.min(positionSize, afterTp.balance);
+                const reShares = entryPrice > 0 ? reSize / entryPrice : 0;
+                const reEvPerShare = winProb * (1 - entryPrice) - (1 - winProb) * entryPrice;
+                await openTestPosition(botId, afterTp, {
+                  direction, marketPrice: upPrice, edge, evPerShare: reEvPerShare,
+                  kellyScaledPct: reSize / afterTp.balance, positionSize: reSize, shares: reShares, priceImpact: 0,
+                }, btcData.currentPrice, encode5mMarketId(market5m));
+              }
+            }
+            return;
+          }
+        }
+      }
+    }
+
     if (signal === "NO_TRADE" || positionSize < 1.0 || shares <= 0) return;
 
     const marketId = encode5mMarketId(market5m);
     const evPerShare = winProb * (1 - entryPrice) - (1 - winProb) * entryPrice;
 
-    // ── Step 3: Open new position, or flip if signal reversed ──
+    // ── Step 3b: Open new position, or flip if signal reversed ──
     if (freshState.mode === "test") {
       const openPositions = await db.select().from(tradesTable)
         .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
