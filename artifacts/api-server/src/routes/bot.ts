@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { getBotState, startBot, stopBot, resetBot, setSizingMode } from "../lib/botEngine.js";
+import { getBotState, startBot, stopBot, resetBot, setSizingMode, dequeueBrowserOrder, completeBrowserOrder } from "../lib/botEngine.js";
 import { hasProxy, setProxyUrl, getProxyDisplay, testProxy, polyFetch } from "../lib/proxiedFetch.js";
 import { ethers } from "ethers";
 import * as crypto from "crypto";
@@ -133,6 +133,40 @@ router.get("/bot/api-test", async (_req, res): Promise<void> => {
     polyStatus,
     polyResponse,
   });
+});
+
+/**
+ * Browser-relay endpoints.
+ * The dashboard polls GET /bot/pending-order; when an order is ready, the browser
+ * POSTs it directly to Polymarket (from the user's VPN machine) and then calls
+ * POST /bot/complete-order to record the result.
+ */
+router.get("/bot/pending-order", (_req, res): void => {
+  const pending = dequeueBrowserOrder();
+  if (!pending) { res.json({ pending: null }); return; }
+  // Return the full request payload + trade context so the browser can submit and report back
+  res.json({
+    pending: {
+      id: pending.prepared.id,
+      url: pending.prepared.url,
+      method: pending.prepared.method,
+      headers: pending.prepared.headers,
+      body: pending.prepared.body,
+      meta: pending.prepared.meta,
+      context: { ...pending.tradeContext, botId: pending.botId },
+    },
+  });
+});
+
+router.post("/bot/complete-order", async (req, res): Promise<void> => {
+  const { orderId, success, errorMessage, context } = req.body as {
+    orderId?: string;
+    success: boolean;
+    errorMessage?: string;
+    context: Parameters<typeof completeBrowserOrder>[3];
+  };
+  await completeBrowserOrder(orderId, success, errorMessage, context);
+  res.json({ ok: true });
 });
 
 export default router;

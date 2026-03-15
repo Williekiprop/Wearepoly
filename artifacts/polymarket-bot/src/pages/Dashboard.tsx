@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { useBotPolling } from "@/hooks/use-bot-data";
+import { useBotPolling, useBrowserOrderRelay } from "@/hooks/use-bot-data";
 import { 
   TerminalCard, 
   TerminalCardHeader, 
@@ -68,6 +68,8 @@ export default function Dashboard() {
   const tradesData = trades.data;
 
   const isRunning = botData?.running || false;
+  const isLive = isRunning && botData?.mode === "live";
+  const relayStatus = useBrowserOrderRelay(isLive);
 
   // Keep toggles in sync with the actual running state
   useEffect(() => {
@@ -216,6 +218,46 @@ export default function Dashboard() {
           <div className="flex flex-col gap-0.5">
             <span className="text-green-400 font-bold tracking-wide">PROXY ACTIVE — Geoblock Bypassed</span>
             <span className="text-muted-foreground text-xs">All Polymarket requests are routing through your configured proxy. LIVE mode orders should reach the CLOB API.</span>
+          </div>
+        </div>
+      )}
+
+      {/* BROWSER-RELAY STATUS — shown when LIVE mode active (no proxy needed) */}
+      {isLive && !proxyEnabled && relayStatus.state === "idle" && (
+        <div className="flex items-center gap-3 bg-blue-500/10 border border-blue-500/30 rounded-xl px-5 py-3 font-mono text-sm">
+          <span className="text-blue-400 text-base">⚡</span>
+          <div className="flex flex-col gap-0.5">
+            <span className="text-blue-400 font-bold tracking-wide">BROWSER-RELAY ACTIVE — Keep this tab open</span>
+            <span className="text-muted-foreground text-xs">Orders are signed on the server and submitted through your browser (VPN machine). Dashboard must stay open while trading.</span>
+          </div>
+        </div>
+      )}
+      {isLive && relayStatus.state === "submitting" && (
+        <div className="flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-5 py-3 font-mono text-sm animate-pulse">
+          <span className="text-yellow-400 text-base">⏳</span>
+          <div className="flex flex-col gap-0.5">
+            <span className="text-yellow-400 font-bold tracking-wide">SUBMITTING ORDER VIA BROWSER...</span>
+            <span className="text-muted-foreground text-xs">
+              BUY {relayStatus.meta.direction} — ${relayStatus.meta.sizeUsdc.toFixed(2)} @ {(relayStatus.meta.price * 100).toFixed(1)}¢ — routing via your VPN
+            </span>
+          </div>
+        </div>
+      )}
+      {isLive && relayStatus.state === "success" && (
+        <div className="flex items-center gap-3 bg-green-500/10 border border-green-500/30 rounded-xl px-5 py-3 font-mono text-sm">
+          <span className="text-green-400 text-base">✓</span>
+          <div className="flex flex-col gap-0.5">
+            <span className="text-green-400 font-bold tracking-wide">ORDER PLACED — {relayStatus.orderId}</span>
+            <span className="text-muted-foreground text-xs">Successfully submitted via browser relay through your VPN.</span>
+          </div>
+        </div>
+      )}
+      {isLive && relayStatus.state === "error" && (
+        <div className="flex items-center gap-3 bg-red-500/10 border border-red-500/30 rounded-xl px-5 py-3 font-mono text-sm">
+          <span className="text-red-400 text-base">✗</span>
+          <div className="flex flex-col gap-0.5">
+            <span className="text-red-400 font-bold tracking-wide">ORDER FAILED</span>
+            <span className="text-muted-foreground text-xs">{relayStatus.message}</span>
           </div>
         </div>
       )}

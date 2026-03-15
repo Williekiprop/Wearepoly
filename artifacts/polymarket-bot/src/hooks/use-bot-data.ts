@@ -1,4 +1,5 @@
 import { useQueryClient, useMutation } from "@tanstack/react-query";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { 
   useGetBotStatus, 
   useGetMarketAnalysis, 
@@ -12,6 +13,90 @@ import {
 } from "@workspace/api-client-react";
 
 const API_BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") + "/api";
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Browser-relay hook: polls server for pending LIVE orders, submits them
+// directly from the browser (which is on the user's VPN-connected machine).
+// Private key never leaves the server — only the pre-signed payload is sent.
+// ──────────────────────────────────────────────────────────────────────────────
+export type RelayStatus =
+  | { state: "idle" }
+  | { state: "submitting"; meta: { direction: string; price: number; sizeUsdc: number } }
+  | { state: "success"; orderId: string }
+  | { state: "error"; message: string };
+
+export function useBrowserOrderRelay(isLive: boolean) {
+  const [relayStatus, setRelayStatus] = useState<RelayStatus>({ state: "idle" });
+  const submitting = useRef(false);
+  const queryClient = useQueryClient();
+
+  const pollAndSubmit = useCallback(async () => {
+    if (submitting.current) return;
+
+    // Check for pending order
+    const res = await fetch(`${API_BASE}/bot/pending-order`).catch(() => null);
+    if (!res?.ok) return;
+    const data = await res.json() as { pending: null | {
+      id: string; url: string; method: string; headers: Record<string, string>;
+      body: string; meta: { direction: string; price: number; sizeUsdc: number };
+      context: Record<string, unknown>;
+    }};
+    if (!data.pending) return;
+
+    submitting.current = true;
+    setRelayStatus({ state: "submitting", meta: data.pending.meta });
+
+    let orderId: string | undefined;
+    let success = false;
+    let errorMessage: string | undefined;
+
+    try {
+      // POST directly to Polymarket from this browser (VPN-connected machine)
+      const polyRes = await fetch(data.pending.url, {
+        method: "POST",
+        headers: data.pending.headers,
+        body: data.pending.body,
+      });
+      const polyText = await polyRes.text();
+      let polyJson: { orderID?: string; error?: string; errorMsg?: string } = {};
+      try { polyJson = JSON.parse(polyText); } catch { /* non-JSON */ }
+
+      if (polyRes.ok && polyJson.orderID) {
+        orderId = polyJson.orderID;
+        success = true;
+        setRelayStatus({ state: "success", orderId });
+        setTimeout(() => setRelayStatus({ state: "idle" }), 4000);
+      } else {
+        errorMessage = polyJson.error ?? polyJson.errorMsg ?? polyText ?? `HTTP ${polyRes.status}`;
+        setRelayStatus({ state: "error", message: errorMessage ?? "Unknown error" });
+        setTimeout(() => setRelayStatus({ state: "idle" }), 6000);
+      }
+    } catch (e) {
+      errorMessage = e instanceof Error ? e.message : String(e);
+      setRelayStatus({ state: "error", message: errorMessage });
+      setTimeout(() => setRelayStatus({ state: "idle" }), 6000);
+    }
+
+    // Report result back to server
+    await fetch(`${API_BASE}/bot/complete-order`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderId, success, errorMessage, context: data.pending.context }),
+    }).catch(() => null);
+
+    queryClient.invalidateQueries({ queryKey: getGetBotStatusQueryKey() });
+    queryClient.invalidateQueries({ queryKey: getGetTradesQueryKey() });
+    submitting.current = false;
+  }, [queryClient]);
+
+  useEffect(() => {
+    if (!isLive) return;
+    const interval = setInterval(pollAndSubmit, 3000);
+    return () => clearInterval(interval);
+  }, [isLive, pollAndSubmit]);
+
+  return relayStatus;
+}
 
 // Wrap generated hooks to add polling logic
 export function useBotPolling() {

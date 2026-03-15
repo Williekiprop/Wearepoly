@@ -18,10 +18,87 @@ import { eq, and } from "drizzle-orm";
 import { calcKelly, simulatePriceImpact } from "./lmsr.js";
 import { getBtcPriceData, estimateTrueProb } from "./btcPrice.js";
 import { getBestBtcMarketPrice, getConnectionStatus } from "./polymarketClient.js";
-import { placeOrder, getClobTokenId, getWalletBalance } from "./polymarketOrder.js";
+import { placeOrder, prepareOrderForBrowser, getClobTokenId, getWalletBalance, type PreparedBrowserOrder } from "./polymarketOrder.js";
+import { hasProxy } from "./proxiedFetch.js";
 
 const B_PARAM = 100;
 const MIN_LIVE_ORDER_USDC = 0.50;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// BROWSER-RELAY ORDER QUEUE
+// Orders queued here when no proxy is active — browser picks them up and POSTs
+// directly to Polymarket from the user's VPN-connected machine.
+// ──────────────────────────────────────────────────────────────────────────────
+interface PendingBrowserOrder {
+  prepared: PreparedBrowserOrder;
+  botId: number;
+  tradeContext: {
+    direction: "YES" | "NO";
+    marketPrice: number;
+    estimatedProb: number;
+    edge: number;
+    kellyScaledPct: number;
+    positionSize: number;
+    shares: number;
+    priceImpact: number;
+    btcPrice: number;
+    marketId: string;
+  };
+  queuedAt: number;
+}
+
+const browserOrderQueue: PendingBrowserOrder[] = [];
+
+/** Called by the API route: browser polls for the next pending order. */
+export function dequeueBrowserOrder(): PendingBrowserOrder | null {
+  // Expire orders older than 50s (HMAC timestamp window)
+  const now = Date.now();
+  while (browserOrderQueue.length > 0 && now - browserOrderQueue[0].queuedAt > 50_000) {
+    browserOrderQueue.shift();
+  }
+  return browserOrderQueue.shift() ?? null;
+}
+
+/** Called by the API route: browser reports success/failure after submitting to Polymarket. */
+export async function completeBrowserOrder(
+  orderId: string | undefined,
+  success: boolean,
+  errorMessage: string | undefined,
+  ctx: PendingBrowserOrder["tradeContext"] & { botId: number }
+): Promise<void> {
+  const { botId, direction, marketPrice, estimatedProb, edge, kellyScaledPct,
+    positionSize, shares, priceImpact, btcPrice, marketId } = ctx;
+
+  if (success && orderId) {
+    await db.insert(tradesTable).values({
+      direction, marketPrice, estimatedProb, edge,
+      kellyFraction: kellyScaledPct, positionSize, shares, priceImpact,
+      exitPrice: null, pnl: null, status: "open",
+      btcPriceAtEntry: btcPrice,
+      marketId: `${marketId}::${orderId}`,
+      resolvedAt: null, mode: "live",
+    });
+    const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+    if (state) {
+      await db.update(botStateTable).set({
+        balance: state.balance - positionSize,
+        totalTrades: state.totalTrades + 1,
+        lastSignal: `LIVE ${direction} — $${positionSize.toFixed(2)} placed`,
+        lastUpdated: new Date(),
+      }).where(eq(botStateTable.id, botId));
+    }
+    console.log(`[LIVE/BROWSER] Order placed OK: ${orderId}`);
+  } else {
+    console.error(`[LIVE/BROWSER] Order failed: ${errorMessage}`);
+    const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+    if (state) {
+      await db.update(botStateTable).set({
+        lastSignal: `ORDER FAILED: ${(errorMessage ?? "").substring(0, 60)}`,
+        lastUpdated: new Date(),
+      }).where(eq(botStateTable.id, botId));
+    }
+  }
+}
 
 // How many 30s cycles to hold a test position before closing at market price
 const TEST_HOLD_CYCLES = 2; // 60 seconds
@@ -451,15 +528,39 @@ async function executeLiveTrade(
   }
 
   const limitPrice = direction === "YES" ? marketPrice : 1 - marketPrice;
-  console.log(`[LIVE] Placing ${direction} order: $${orderSize.toFixed(2)} @ ${(limitPrice * 100).toFixed(1)}¢`);
-
-  const result = await placeOrder({ tokenId, side: "BUY", price: limitPrice, sizeUsdc: orderSize });
   const trueYesProb = Math.min(0.95, Math.max(0.05, marketPrice + edge));
+  const tradeCtx = {
+    direction, marketPrice, estimatedProb: trueYesProb, edge,
+    kellyScaledPct, positionSize: orderSize, shares, priceImpact, btcPrice, marketId,
+  };
+
+  // ── Browser-relay mode: no proxy configured → queue for browser to submit ──
+  if (!hasProxy()) {
+    console.log(`[LIVE] No proxy — queuing ${direction} order for browser relay`);
+    try {
+      const prepared = await prepareOrderForBrowser({ tokenId, side: "BUY", price: limitPrice, sizeUsdc: orderSize });
+      browserOrderQueue.push({ prepared, botId, tradeContext: tradeCtx, queuedAt: Date.now() });
+      await db.update(botStateTable).set({
+        lastSignal: `LIVE ${direction} — awaiting browser relay ($${orderSize.toFixed(2)})`,
+        lastUpdated: new Date(),
+      }).where(eq(botStateTable.id, botId));
+    } catch (err) {
+      console.error("[LIVE] Failed to prepare browser order:", err);
+      await db.update(botStateTable).set({
+        lastSignal: `ORDER PREP FAILED: ${String(err).substring(0, 60)}`,
+        lastUpdated: new Date(),
+      }).where(eq(botStateTable.id, botId));
+    }
+    return;
+  }
+
+  // ── Proxy mode: place directly from server ──
+  console.log(`[LIVE] Placing ${direction} order via proxy: $${orderSize.toFixed(2)} @ ${(limitPrice * 100).toFixed(1)}¢`);
+  const result = await placeOrder({ tokenId, side: "BUY", price: limitPrice, sizeUsdc: orderSize });
 
   if (result.success) {
     await db.insert(tradesTable).values({
-      direction, marketPrice,
-      estimatedProb: trueYesProb,
+      direction, marketPrice, estimatedProb: trueYesProb,
       edge, kellyFraction: kellyScaledPct,
       positionSize: orderSize, shares, priceImpact,
       exitPrice: null, pnl: null, status: "open",
@@ -467,15 +568,12 @@ async function executeLiveTrade(
       marketId: result.orderId ? `${marketId}::${result.orderId}` : marketId,
       resolvedAt: null, mode: "live",
     });
-    await db
-      .update(botStateTable)
-      .set({
-        balance: state.balance - orderSize,
-        totalTrades: state.totalTrades + 1,
-        lastSignal: `LIVE ${direction} — $${orderSize.toFixed(2)} placed`,
-        lastUpdated: new Date(),
-      })
-      .where(eq(botStateTable.id, botId));
+    await db.update(botStateTable).set({
+      balance: state.balance - orderSize,
+      totalTrades: state.totalTrades + 1,
+      lastSignal: `LIVE ${direction} — $${orderSize.toFixed(2)} placed`,
+      lastUpdated: new Date(),
+    }).where(eq(botStateTable.id, botId));
     console.log(`[LIVE] Order placed OK: ${result.orderId}`);
   } else {
     const errorMsg = result.errorMessage ?? "";
@@ -484,19 +582,16 @@ async function executeLiveTrade(
     if (isGeoblock) {
       console.error("[LIVE] Geoblock — stopping bot.");
       stopPolling();
-      await db
-        .update(botStateTable)
-        .set({
-          running: false,
-          lastSignal: "BLOCKED: Polymarket restricts orders from Replit servers. Run locally or on a EU server.",
-          lastUpdated: new Date(),
-        })
-        .where(eq(botStateTable.id, botId));
+      await db.update(botStateTable).set({
+        running: false,
+        lastSignal: "BLOCKED: Geoblock. Enable proxy or keep dashboard open for browser-relay.",
+        lastUpdated: new Date(),
+      }).where(eq(botStateTable.id, botId));
     } else {
-      await db
-        .update(botStateTable)
-        .set({ lastSignal: `ORDER FAILED: ${errorMsg.substring(0, 60)}`, lastUpdated: new Date() })
-        .where(eq(botStateTable.id, botId));
+      await db.update(botStateTable).set({
+        lastSignal: `ORDER FAILED: ${errorMsg.substring(0, 60)}`,
+        lastUpdated: new Date(),
+      }).where(eq(botStateTable.id, botId));
     }
   }
 }

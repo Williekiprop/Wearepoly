@@ -56,6 +56,16 @@ export interface OrderResult {
   transactionHash?: string;
 }
 
+/** A fully signed + authenticated order payload ready for the browser to POST directly to Polymarket. */
+export interface PreparedBrowserOrder {
+  id: string;
+  url: string;
+  method: "POST";
+  headers: Record<string, string>;
+  body: string;
+  meta: { direction: string; price: number; sizeUsdc: number };
+}
+
 function getWallet(): ethers.Wallet {
   const pk = process.env.POLYMARKET_WALLET_KEY;
   if (!pk) throw new Error("POLYMARKET_WALLET_KEY not set");
@@ -209,6 +219,34 @@ export async function getClobTokenId(
     console.error("getClobTokenId error:", err);
     return null;
   }
+}
+
+/**
+ * Build a fully-signed order + HMAC auth headers and return them WITHOUT sending.
+ * The browser picks this up and POSTs directly to Polymarket from the user's
+ * VPN-connected machine — bypassing Replit's datacenter IP restriction.
+ */
+export async function prepareOrderForBrowser(
+  params: PlaceOrderParams
+): Promise<PreparedBrowserOrder> {
+  const wallet = getWallet();
+  const eoaAddress = await wallet.getAddress();
+  const proxyAddress = getProxyAddress();
+  const owner = proxyAddress ?? eoaAddress;
+
+  const signedOrder = await buildSignedOrder(params, wallet);
+  const body = JSON.stringify({ order: signedOrder, owner, orderType: "GTC" });
+  const path = "/order";
+  const headers = await buildApiHeaders("POST", path, body);
+
+  return {
+    id: crypto.randomUUID(),
+    url: `${CLOB_API}${path}`,
+    method: "POST",
+    headers,
+    body,
+    meta: { direction: params.side, price: params.price, sizeUsdc: params.sizeUsdc },
+  };
 }
 
 /**
