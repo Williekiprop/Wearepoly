@@ -24,3 +24,8 @@ expertMode = true
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 20000
+
+[userenv]
+
+[userenv.shared]
+POLYMARKET_PROXY_ADDRESS = "0x2e5FdAeAAC50bb94f8Cdc51206BD574bcDA77dba"

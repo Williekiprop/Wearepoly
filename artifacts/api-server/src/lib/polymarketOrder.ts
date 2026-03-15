@@ -63,6 +63,19 @@ function getWallet(): ethers.Wallet {
   return new ethers.Wallet(key);
 }
 
+/**
+ * Returns the proxy wallet address (POLY_PROXY).
+ * If POLYMARKET_PROXY_ADDRESS is set, uses it (signature_type=1).
+ * Otherwise falls back to the EOA address (signature_type=0).
+ */
+function getProxyAddress(): string | null {
+  return process.env.POLYMARKET_PROXY_ADDRESS ?? null;
+}
+
+function getSignatureType(): 0 | 1 {
+  return process.env.POLYMARKET_PROXY_ADDRESS ? 1 : 0;
+}
+
 function buildHmacSignature(
   secret: string,
   method: string,
@@ -105,16 +118,26 @@ async function buildApiHeaders(
 /**
  * Build and sign a Polymarket limit order using EIP-712.
  * Returns the signed order payload ready to POST to /order.
+ *
+ * When POLYMARKET_PROXY_ADDRESS is set (POLY_PROXY mode):
+ *   maker  = proxy wallet  (holds USDC, receives tokens)
+ *   signer = EOA           (holds the private key, signs)
+ *   signatureType = 1
+ *
+ * Without proxy (EOA mode):
+ *   maker = signer = EOA, signatureType = 0
  */
 async function buildSignedOrder(
   params: PlaceOrderParams,
-  makerAddress: string,
   wallet: ethers.Wallet
 ): Promise<object> {
   const { tokenId, side, price, sizeUsdc } = params;
+  const eoaAddress = await wallet.getAddress();
+  const proxyAddress = getProxyAddress();
+  const sigType = getSignatureType();
+  const makerAddress = proxyAddress ?? eoaAddress; // proxy holds funds
 
   // Convert to micro-USDC (6 decimals) and token units (6 decimals)
-  const scaledPrice = Math.round(price * 1e6);
   const makerAmount = Math.round(sizeUsdc * 1e6); // USDC in (buy side)
   const takerAmount = Math.round((sizeUsdc / price) * 1e6); // tokens out
 
@@ -124,8 +147,8 @@ async function buildSignedOrder(
 
   const orderData = {
     salt: salt,
-    maker: makerAddress,
-    signer: makerAddress,
+    maker: makerAddress,  // proxy (or EOA if no proxy)
+    signer: eoaAddress,   // always the EOA that signs
     taker: "0x0000000000000000000000000000000000000000",
     tokenId: BigInt(tokenId),
     makerAmount: BigInt(makerAmount),
@@ -134,7 +157,7 @@ async function buildSignedOrder(
     nonce: BigInt(0),
     feeRateBps: BigInt(0),
     side: sideInt,
-    signatureType: 0, // EOA
+    signatureType: sigType,
   };
 
   const signature = await wallet.signTypedData(DOMAIN, ORDER_TYPES, orderData);
@@ -142,7 +165,7 @@ async function buildSignedOrder(
   return {
     salt: salt.toString(),
     maker: makerAddress,
-    signer: makerAddress,
+    signer: eoaAddress,
     taker: "0x0000000000000000000000000000000000000000",
     tokenId: tokenId,
     makerAmount: makerAmount.toString(),
@@ -151,7 +174,7 @@ async function buildSignedOrder(
     nonce: "0",
     feeRateBps: "0",
     side: side,
-    signatureType: 0,
+    signatureType: sigType,
     signature,
   };
 }
@@ -194,13 +217,15 @@ export async function getClobTokenId(
 export async function placeOrder(params: PlaceOrderParams): Promise<OrderResult> {
   try {
     const wallet = getWallet();
-    const makerAddress = wallet.address;
+    const eoaAddress = await wallet.getAddress();
+    const proxyAddress = getProxyAddress();
+    const owner = proxyAddress ?? eoaAddress; // proxy is the account owner on CLOB
 
-    const signedOrder = await buildSignedOrder(params, makerAddress, wallet);
+    const signedOrder = await buildSignedOrder(params, wallet);
 
     const body = JSON.stringify({
       order: signedOrder,
-      owner: makerAddress,
+      owner,
       orderType: "GTC", // Good Till Cancelled
     });
 
@@ -268,9 +293,12 @@ export async function cancelOrder(orderId: string): Promise<boolean> {
  */
 export async function getWalletBalance(): Promise<number | null> {
   try {
-    const wallet = getWallet();
+    const sigType = getSignatureType();
+    const proxyAddress = getProxyAddress();
     const signPath = `/balance-allowance`; // HMAC signs base path only (no query string)
-    const fullPath = `/balance-allowance?asset_type=COLLATERAL&signature_type=0`;
+    // funder = proxy wallet (the address that holds USDC on Polymarket)
+    const funderParam = proxyAddress ? `&funder=${proxyAddress}` : "";
+    const fullPath = `/balance-allowance?asset_type=COLLATERAL&signature_type=${sigType}${funderParam}`;
     const headers = await buildApiHeaders("GET", signPath);
     const res = await polyFetch(`${CLOB_API}${fullPath}`, {
       headers,
