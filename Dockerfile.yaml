@@ -1,0 +1,41 @@
+# Use a recent Node.js base image with pnpm support via Corepack
+FROM node:20-bookworm-slim AS base
+
+# Enable Corepack (built-in pnpm/yarn manager in Node 16+)
+RUN corepack enable
+
+WORKDIR /app
+
+# Copy lockfile + workspace files first for caching
+COPY pnpm-lock.yaml ./
+COPY package.json ./
+COPY pnpm-workspace.yaml ./   # if you have one in root
+COPY .npmrc ./                # if you have custom .npmrc
+
+# Pin your working pnpm version (from Replit)
+ARG PNPM_VERSION=10.26.1
+RUN corepack prepare pnpm@${PNPM_VERSION} --activate
+
+# Install all deps (frozen to avoid mismatches)
+RUN pnpm install --frozen-lockfile --prefer-offline
+
+# Copy the rest of your code
+COPY . .
+
+# Build your app (adjust if your build script is different)
+RUN pnpm build   # or pnpm --filter @workspace/polymarket-bot build if monorepo-specific
+
+# Optional: Prune dev deps for smaller runtime image (multi-stage)
+FROM node:20-bookworm-slim AS runtime
+
+WORKDIR /app
+
+COPY --from=base /app /app
+
+# Expose the port Vite uses (default 5173 for dev/preview)
+EXPOSE 5173
+
+# Start command: Use your "serve" script for preview, or "dev" if you want hot-reload in prod (not recommended)
+# For production, consider a static server like 'serve' package
+CMD ["pnpm", "--filter", "@workspace/polymarket-bot", "serve"]
+# Alternative for dev/hot-reload (if testing): CMD ["pnpm", "--filter", "@workspace/polymarket-bot", "dev", "--host", "0.0.0.0"]
