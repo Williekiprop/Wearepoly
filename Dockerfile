@@ -10,6 +10,8 @@ WORKDIR /app
 COPY pnpm-lock.yaml ./
 COPY package.json ./
 COPY pnpm-workspace.yaml ./
+# COPY .npmrc ./   # only if you have a .npmrc file
+
 # Pin your working pnpm version
 ARG PNPM_VERSION=10.26.1
 RUN corepack prepare pnpm@${PNPM_VERSION} --activate
