@@ -204,7 +204,7 @@ export async function testProxy(): Promise<{
     } catch { /* geo lookup optional */ }
 
     console.log(`[PROXY TEST] Exit IP: ${proxyIp} (${proxyCountry ?? "unknown"}, org: ${proxyOrg}) | Direct IP: ${directIp}`);
-    return { proxyIp, proxyCountry, proxyOrg, isDatacenter, directIp, proxyConfigured: true };
+    return { proxyIp, proxyCountry, directIp, proxyConfigured: true };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[PROXY TEST] Failed:", msg);
