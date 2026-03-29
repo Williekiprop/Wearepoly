@@ -16,7 +16,7 @@ ARG PNPM_VERSION=10.26.1
 RUN corepack prepare pnpm@${PNPM_VERSION} --activate
 
 
-RUN pnpm install --frozen-lockfile --prefer-offline
+RUN pnpm install --frozen-lockfile --prefer-offline && pnpm install --recursive
 
 COPY . .
 RUN pnpm build
