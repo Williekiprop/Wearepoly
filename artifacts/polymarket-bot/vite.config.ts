@@ -10,7 +10,7 @@ const isProduction = process.env.NODE_ENV === "production";
 
 // ⚙️ Safe environment variables (NO crashes)
 const port = Number(process.env.PORT) || 5173;
-const basePath = process.env.BASE_PATH || "/";
+const basePath = "/";
 
 // 🧠 Optional validation (only in dev, not production)
 if (!isProduction) {
