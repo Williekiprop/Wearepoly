@@ -5,7 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/Dashboard";
 
-// Configure query client globally to prevent aggressive refetching unless specified
+// Configure query client
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -28,7 +28,9 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+        <WouterRouter 
+          base={import.meta.env.BASE_URL ? import.meta.env.BASE_URL.replace(/\/$/, "") : "/"}
+        >
           <Router />
         </WouterRouter>
         <Toaster />
