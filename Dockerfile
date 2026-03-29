@@ -1,36 +1,37 @@
 # syntax=docker/dockerfile:1
 FROM node:20-bookworm-slim AS builder
 
-# Enable pnpm via corepack
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
 
 WORKDIR /app
 
-# Copy only dependency files first (critical for Docker layer caching)
+# Copy dependency definition files first
 COPY pnpm-lock.yaml ./
 COPY package.json ./
 COPY pnpm-workspace.yaml ./
 
-# Copy all workspace package.json files so pnpm knows the structure
-# Adjust these paths if your folders are different (e.g. apps/, packages/, artifacts/)
+# Copy all package.json files from workspaces (this is crucial)
+COPY artifacts/*/package.json ./artifacts/
 COPY */package.json ./
 COPY **/*/package.json ./
 
-# Install ALL dependencies (including devDependencies needed for build)
+# Install everything (dev deps included for build)
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm install --frozen-lockfile --prefer-offline
 
-# Now copy the source code
+# Copy source code
 COPY . .
 
-# Build ONLY your Polymarket bot package (this is the key fix)
-# Use the exact name from your package.json "name" field
-RUN pnpm --filter "@workspace/polymarket-bot" build
+# Build ONLY the Polymarket bot package
+RUN pnpm --filter "@workspace/polymarket-bot" build   # ← confirm exact name
 
-# === Production Stage (much smaller image) ===
-FROM node:20-bookworm-slim AS production
+# === Prune to a production-ready folder using pnpm deploy ===
+RUN pnpm deploy --filter "@workspace/polymarket-bot" --prod /prod/app
+
+# === Final lightweight production stage ===
+FROM node:20-bookworm-slim
 
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
@@ -38,21 +39,13 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Copy only what's needed for running the bot
-COPY --from=builder /app/pnpm-lock.yaml ./
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/artifacts ./artifacts   # or wherever your build output lands (dist/, build/, etc.)
+# Copy the pruned app from builder
+COPY --from=builder /prod/app ./
 
-# Install only production dependencies
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
-    pnpm install --prod --frozen-lockfile
+# Your actual bot start command goes here
+# Option 1: If your package.json has a "start" script
+CMD ["pnpm", "start"]
 
-# If your bot has its own package.json in a subfolder, you can copy that too if needed
-
-# Change this to your actual bot start command
-# Common options for background bots:
-CMD ["pnpm", "--filter", "@workspace/polymarket-bot", "start"]
-
-# Alternative if you want to run the built JS directly (often better for bots):
-# CMD ["node", "artifacts/polymarket-bot/dist/index.js"]   # adjust path to your actual entry file
+# Option 2 (often better for background bots): Run the built file directly
+# CMD ["node", "dist/index.js"]          # adjust path if your build outputs to dist/, build/, etc.
+# CMD ["node", "artifacts/polymarket-bot/dist/index.js"]  # example if needed
