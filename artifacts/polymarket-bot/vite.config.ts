@@ -73,6 +73,13 @@ export default defineConfig(async () => {
       port,
       host: "0.0.0.0",
       allowedHosts: true,
+      // Proxy /api and /auth calls to the Express API server in dev
+      proxy: {
+        "/api": {
+          target: "http://localhost:8080",
+          changeOrigin: true,
+        },
+      },
       fs: {
         strict: true,
         deny: ["**/.*"],

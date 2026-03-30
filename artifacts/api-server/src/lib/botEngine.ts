@@ -417,10 +417,18 @@ function startPolling(botId: number) {
  */
 export async function autoResumeBot() {
   const state = await ensureBotState();
-  if (state.running && pollingInterval === null) {
-    const label = state.totalTrades === 0 ? "Auto-starting fresh" : "Auto-resuming";
-    console.log(`[BOT] ${label} ${state.mode.toUpperCase()} bot (balance $${state.balance?.toFixed(2)}) after restart`);
+  if (pollingInterval !== null) return; // already polling
+
+  if (state.running) {
+    console.log(`[BOT] Auto-resuming ${state.mode.toUpperCase()} bot (balance $${state.balance?.toFixed(2)}) after restart`);
     startPolling(state.id);
+  } else if (state.totalTrades === 0) {
+    // Fresh or fully-reset state — auto-start in TEST mode so Render boots ready to trade
+    console.log(`[BOT] Auto-starting fresh TEST bot (balance $${state.balance?.toFixed(2)}) — no prior trades on record`);
+    await db.update(botStateTable).set({ running: true, lastUpdated: new Date() }).where(eq(botStateTable.id, state.id));
+    startPolling(state.id);
+  } else {
+    console.log(`[BOT] STANDBY — bot was manually stopped (${state.totalTrades} prior trades). Awaiting manual start.`);
   }
 }
 

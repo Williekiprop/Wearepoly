@@ -227,7 +227,7 @@ async function fetchTokenMeta(): Promise<TokenMeta | null> {
     try {
       const res = await polyFetch(
         `${GAMMA_API}/events?slug=${slug}`,
-        { signal: AbortSignal.timeout(8000) },
+        { signal: AbortSignal.timeout(4000) },
       );
       if (!res.ok) continue;
 
