@@ -633,7 +633,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                     )}
                   </div>
                   <p className="text-[9px] font-mono text-muted-foreground/60 mt-1">
-                    Bot trades only when model edge ≥ this. Lower = more trades, higher = more selective.
+                    Bot trades only when model edge ≥ this. Data shows 19–21% is the sweet spot (75–90% win rate). Above 22% the model is chasing extreme prices — those are capped automatically.
                     {botData && (
                       <span className="text-primary/60"> Current: {(((botData as any).minEdgeThreshold ?? 0.01) * 100).toFixed(1)}%</span>
                     )}

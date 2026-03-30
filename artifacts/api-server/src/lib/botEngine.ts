@@ -219,6 +219,11 @@ const TAKE_PROFIT_MARKET_GAIN = 0.15; // 15¢ price move = take-profit (late sni
 const EDGE_HOLD_MS        = 10_000;   // 10 s min hold before flip/TP in EDGE mode
 const EDGE_TAKE_PROFIT    = 0.08;     // 8¢ price move = take-profit (edge snipe)
 const EDGE_STOP_LOSS      = 0.08;     // 8¢ adverse move = stop-loss (matches TP → 1:1 risk-reward, profitable at >50% win rate)
+// Edge sweet-spot cap: trades with computed edge >22% are paradoxically bad.
+// When the model sees >22% edge, the price is so extreme that the market has
+// already priced in strong momentum the 1-minute BTC signal can't see.
+// Data: edge 19–21% → 75–90% win rate; edge 22%+ → 14–50% win rate.
+const MAX_EDGE_THRESHOLD  = 0.22;
 // Slippage estimate: real CLOB fills at the ASK (buying) or BID (selling).
 // Midpoint is used for signal decisions, but we deduct ~1¢ from P&L on entry
 // to give an honest simulation of real fill costs.
@@ -252,7 +257,7 @@ async function ensureBotState() {
       currentMarketPrice: undefined,
       lastSignal: undefined,
       kellyFraction: 0.25,
-      minEdgeThreshold: 0.12,  // data-driven default (see trade analysis)
+      minEdgeThreshold: 0.19,  // data-driven: 19–21% edge → 75–90% win rate
       sizingMode: "kelly",
       flatSizeUsdc: 1.0,
       lossStreak: 0,
@@ -337,7 +342,7 @@ export async function startBot(opts: {
       currentMarketPrice: undefined,
       lastSignal: opts.mode === "live" ? "LIVE MODE — Connecting..." : "Paper trading on live feed...",
       kellyFraction: opts.kellyFraction ?? 0.25, // Quarter-Kelly
-      minEdgeThreshold: opts.minEdgeThreshold ?? 0.04, // 4% default
+      minEdgeThreshold: opts.minEdgeThreshold ?? 0.19, // data-driven: 19–21% edge sweet spot
       sizingMode,
       flatSizeUsdc,
       lastUpdated: now,
@@ -602,8 +607,9 @@ async function runBotCycle(botId: number) {
     // Apply sizing multiplier from drawdown protection (0.5 after 5 loss streak)
     const sizingMultiplier = freshState.sizingMultiplier ?? 1.0;
 
+    const edgeTooHigh = edge > MAX_EDGE_THRESHOLD; // >22% → paradoxically bad (see constant)
     const minBalance = freshState.sizingMode === "flat" ? freshState.flatSizeUsdc : 0.5;
-    if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && edge >= freshState.minEdgeThreshold && freshState.balance >= minBalance) {
+    if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && edge >= freshState.minEdgeThreshold && freshState.balance >= minBalance) {
       signal = isBuyUp ? "BUY_YES" : "BUY_NO";
 
       if (freshState.sizingMode === "flat") {
@@ -632,6 +638,7 @@ async function runBotCycle(botId: number) {
         : tooLate  ? `TOO_LATE (${market5m.secondsRemaining}s left, min ${entryMin}s)`
         : priceTooCertain ? `PRICE_CAP (${certainSide} > ${MAX_MARKET_CERTAINTY*100}¢ max)`
         : inNoMansLand ? `NO_MANS_LAND (UP=${(upPrice*100).toFixed(1)}¢ in 31-45¢/55-69¢ dead zone)`
+        : edgeTooHigh ? `EDGE_TOO_HIGH (${edgePct}% > ${(MAX_EDGE_THRESHOLD*100).toFixed(0)}% cap — extreme price, market momentum too strong)`
         : `edge ${edgePct}% < threshold ${(freshState.minEdgeThreshold*100).toFixed(1)}%`;
       // Throttle: with 3s cycles, log at most once per 15s to reduce noise.
       // Always log if we're in (or near) the entry window.

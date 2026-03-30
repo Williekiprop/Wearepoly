@@ -70,7 +70,7 @@ function memDb() {
             currentMarketPrice: data.currentMarketPrice ?? null,
             lastSignal: data.lastSignal ?? null,
             kellyFraction: data.kellyFraction ?? 0.25,
-            minEdgeThreshold: data.minEdgeThreshold ?? 0.12,
+            minEdgeThreshold: data.minEdgeThreshold ?? 0.19,
             sizingMode: data.sizingMode ?? "flat",
             flatSizeUsdc: data.flatSizeUsdc ?? 1.0,
             lastUpdated: data.lastUpdated ?? now,
@@ -230,6 +230,14 @@ export async function runMigrations(): Promise<void> {
     for (const sql of patches) {
       await client.query(sql);
     }
+
+    // ── Data-driven threshold upgrades ────────────────────────────────────────
+    // If the row still has the old 12% default, upgrade it to the new 19%
+    // minimum that the trade-performance analysis identified as the edge sweet
+    // spot (19–21% edge → 75–90% win rate vs 12–18% → random noise).
+    await client.query(
+      `UPDATE bot_state SET min_edge_threshold = 0.19 WHERE min_edge_threshold <= 0.12`
+    );
 
     console.log("[DB] Migrations complete ✓");
   } catch (err) {
