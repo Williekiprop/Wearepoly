@@ -1,0 +1,50 @@
+2026-03-30T20:06:41.966326467Z 
+2026-03-30T20:06:41.966354668Z > @workspace/polymarket-bot@0.0.0 build /opt/render/project/src/artifacts/polymarket-bot
+2026-03-30T20:06:41.966361578Z > vite build --config vite.config.ts
+2026-03-30T20:06:41.966364668Z 
+2026-03-30T20:06:42.343044639Z vite v7.3.1 building client environment for production...
+2026-03-30T20:06:42.414652579Z transforming...
+2026-03-30T20:06:42.70413863Z Found 1 warning while optimizing generated CSS:
+2026-03-30T20:06:42.70415801Z 
+2026-03-30T20:06:42.70416149Z │   }
+2026-03-30T20:06:42.70416462Z │   color-scheme: dark;
+2026-03-30T20:06:42.70416746Z │ }
+2026-03-30T20:06:42.70417097Z ┆ ^-- Unexpected end of input
+2026-03-30T20:06:42.704173531Z ┆
+2026-03-30T20:06:42.7041768Z │ @layer utilities {
+2026-03-30T20:06:42.704179411Z │   .text-glow-success {
+2026-03-30T20:06:42.704181891Z 
+2026-03-30T20:06:42.761367743Z src/components/ui/tooltip.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+2026-03-30T20:06:47.805902124Z ✓ 3091 modules transformed.
+2026-03-30T20:06:48.403038765Z rendering chunks...
+2026-03-30T20:06:48.418788308Z computing gzip size...
+2026-03-30T20:06:48.446452702Z dist/index.html                   0.75 kB │ gzip:   0.42 kB
+2026-03-30T20:06:48.446484202Z dist/assets/index-BS5W9FHy.css   97.40 kB │ gzip:  15.81 kB
+2026-03-30T20:06:48.446608194Z dist/assets/index-DKBkkrtN.js   943.38 kB │ gzip: 277.85 kB
+2026-03-30T20:06:48.446638655Z 
+2026-03-30T20:06:48.446647555Z (!) Some chunks are larger than 500 kB after minification. Consider:
+2026-03-30T20:06:48.446653825Z - Using dynamic import() to code-split the application
+2026-03-30T20:06:48.446661586Z - Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+2026-03-30T20:06:48.446667606Z - Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+2026-03-30T20:06:48.44687428Z ✓ built in 6.07s
+2026-03-30T20:07:58.264478609Z ==> Uploading build...
+2026-03-30T20:08:09.87629761Z ==> Uploaded in 6.0s. Compression took 5.6s
+2026-03-30T20:08:09.911149271Z ==> Build successful 🎉
+2026-03-30T20:08:14.437057791Z ==> Deploying...
+2026-03-30T20:08:14.561828694Z ==> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+2026-03-30T20:08:38.743375965Z ==> Running 'cd artifacts/api-server && pnpm exec tsx src/app.ts'
+2026-03-30T20:08:39.939063491Z ! Corepack is about to download https://registry.npmjs.org/pnpm/-/pnpm-10.33.0.tgz
+2026-03-30T20:09:10.640014706Z Serving frontend from: /opt/render/project/src/artifacts/api-server/artifacts/polymarket-bot/dist
+2026-03-30T20:09:10.640121308Z Dist exists? false
+2026-03-30T20:09:10.640137238Z Index exists? false
+2026-03-30T20:09:10.640206479Z ❌ Frontend dist folder not found!
+2026-03-30T20:09:10.73335005Z 🚀 Server running on port 10000
+2026-03-30T20:09:10.991718652Z ❌ index.html NOT FOUND
+2026-03-30T20:09:20.506101298Z ==> Your service is live 🎉
+2026-03-30T20:09:20.672589483Z ==> 
+2026-03-30T20:09:20.675726779Z ==> ///////////////////////////////////////////////////////////
+2026-03-30T20:09:20.678588368Z ==> 
+2026-03-30T20:09:20.681328813Z ==> Available at your primary URL https://wearepoly.onrender.com
+2026-03-30T20:09:20.684200132Z ==> 
+2026-03-30T20:09:20.687153214Z ==> ///////////////////////////////////////////////////////////
+2026-03-30T20:09:21.973316531Z ❌ index.html NOT FOUND
