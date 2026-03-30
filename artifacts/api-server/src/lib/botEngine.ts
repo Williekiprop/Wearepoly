@@ -595,21 +595,30 @@ async function runBotCycle(botId: number) {
     const MAX_MARKET_CERTAINTY = 0.75;
     const priceTooCertain = Math.max(upPrice, downPrice) > MAX_MARKET_CERTAINTY;
 
-    // Data-driven filter: skip the "no-man's land" mid-range price zone.
-    // Historical analysis of 49 trades showed:
-    //   Extreme (≤30¢/≥70¢)     → 90% win rate, avg +$0.62/trade
-    //   Near-50  (46–54¢)        → 63% win rate, avg +$0.16/trade
-    //   Mid-range (31–45¢/55–69¢)→ 46% win rate, avg −$0.07/trade  ← skip this zone
-    // The mid-range zone is where the market has "made up its mind" (60–70% confident)
-    // but our momentum signal isn't strong enough to override that conviction.
-    const inNoMansLand = (upPrice >= 0.31 && upPrice <= 0.45) || (upPrice >= 0.55 && upPrice <= 0.69);
+    // Data-driven filter: skip price zones where the model consistently loses.
+    // Updated analysis (108 closed trades):
+    //   upPrice < 0.30 (YES entries)  → 50% win rate, avg −$0.04  ← skip: extreme price, mkt momentum > our signal
+    //   upPrice 0.30–0.31             → 85.7% win rate             ← best YES entry zone, keep
+    //   upPrice 31–45¢ / 55–69¢      → 46% win rate, avg −$0.07   ← mid-range dead zone, skip
+    //   upPrice 45–55¢ / 69–75¢      → 63–75% win rate             ← tradeable
+    const inNoMansLand =
+      upPrice < 0.30 ||                                      // very cheap UP — market has already priced the BTC move
+      (upPrice >= 0.31 && upPrice <= 0.45) ||               // mid-range dead zone (YES side)
+      (upPrice >= 0.55 && upPrice <= 0.69);                 // mid-range dead zone (NO side)
+
+    // Direction-aware edge threshold:
+    // YES (BUY_UP) win rate 53.6% vs NO (BUY_DOWN) win rate 61.5% across 108 trades.
+    // Require 2% more edge for YES entries to compensate for lower directional reliability.
+    const directionEdgeThreshold = isBuyUp
+      ? freshState.minEdgeThreshold + 0.02   // e.g. 21% for YES
+      : freshState.minEdgeThreshold;          // 19% for NO
 
     // Apply sizing multiplier from drawdown protection (0.5 after 5 loss streak)
     const sizingMultiplier = freshState.sizingMultiplier ?? 1.0;
 
     const edgeTooHigh = edge > MAX_EDGE_THRESHOLD; // >22% → paradoxically bad (see constant)
     const minBalance = freshState.sizingMode === "flat" ? freshState.flatSizeUsdc : 0.5;
-    if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && edge >= freshState.minEdgeThreshold && freshState.balance >= minBalance) {
+    if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && edge >= directionEdgeThreshold && freshState.balance >= minBalance) {
       signal = isBuyUp ? "BUY_YES" : "BUY_NO";
 
       if (freshState.sizingMode === "flat") {
@@ -637,9 +646,9 @@ async function runBotCycle(botId: number) {
       const reason = tooEarly ? `TOO_EARLY (${market5m.secondsRemaining}s left, wait for ≤${entryMax}s)`
         : tooLate  ? `TOO_LATE (${market5m.secondsRemaining}s left, min ${entryMin}s)`
         : priceTooCertain ? `PRICE_CAP (${certainSide} > ${MAX_MARKET_CERTAINTY*100}¢ max)`
-        : inNoMansLand ? `NO_MANS_LAND (UP=${(upPrice*100).toFixed(1)}¢ in 31-45¢/55-69¢ dead zone)`
+        : inNoMansLand ? `NO_MANS_LAND (UP=${(upPrice*100).toFixed(1)}¢ — <30¢/31-45¢/55-69¢ dead zone)`
         : edgeTooHigh ? `EDGE_TOO_HIGH (${edgePct}% > ${(MAX_EDGE_THRESHOLD*100).toFixed(0)}% cap — extreme price, market momentum too strong)`
-        : `edge ${edgePct}% < threshold ${(freshState.minEdgeThreshold*100).toFixed(1)}%`;
+        : `edge ${edgePct}% < ${isBuyUp ? "YES" : "NO"} threshold ${(directionEdgeThreshold*100).toFixed(1)}%`;
       // Throttle: with 3s cycles, log at most once per 15s to reduce noise.
       // Always log if we're in (or near) the entry window.
       const inOrNearWindow = !tooEarly;
