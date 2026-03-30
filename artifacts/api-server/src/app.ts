@@ -15,6 +15,15 @@ console.log("Frontend path:", frontendPath);
 // Serve static files
 app.use(express.static(frontendPath));
 
+import fs from "fs";
+
+console.log("Frontend path:", frontendPath);
+console.log("Dist exists:", fs.existsSync(frontendPath));
+console.log(
+  "Index exists:",
+  fs.existsSync(path.join(frontendPath, "index.html"))
+);
+
 
 // ✅ Allow requests from your frontend
 app.use(
