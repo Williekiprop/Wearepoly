@@ -48,6 +48,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
   const [startBalanceInput, setStartBalanceInput] = useState("4");
   const [mode, setMode] = useState<"test" | "live">("test");
   const [sizingMode, setSizingModeLocal] = useState<"flat" | "kelly">("flat");
+  const [sniperModeLocal, setSniperModeLocal] = useState<"late" | "edge" | "both">("late");
   const [proxyInput, setProxyInput] = useState("");
   const [proxyApplied, setProxyApplied] = useState(false);
   const [localApiInput, setLocalApiInput] = useState(() =>
@@ -86,6 +87,11 @@ export default function Dashboard({ onLogout }: DashboardProps) {
   useEffect(() => {
     if ((botData as any)?.sizingMode) setSizingModeLocal((botData as any).sizingMode);
   }, [(botData as any)?.sizingMode]);
+
+  useEffect(() => {
+    const m = (botData as any)?.sniperMode;
+    if (m) setSniperModeLocal(m);
+  }, [(botData as any)?.sniperMode]);
 
   const [thresholdInput, setThresholdInput] = useState("4");
   // Sync threshold input to actual running bot value when data arrives
@@ -167,6 +173,16 @@ export default function Dashboard({ onLogout }: DashboardProps) {
     if (isRunning) {
       mutations.sizing.mutate({ sizingMode: newMode, flatSizeUsdc: 1.0 });
     }
+  };
+
+  const handleSniperModeChange = async (newMode: "late" | "edge" | "both") => {
+    setSniperModeLocal(newMode);
+    await fetch(`${import.meta.env.BASE_URL?.replace(/\/$/, "")}/api/bot/sniper-mode`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...getAuthHeader() },
+      body: JSON.stringify({ sniperMode: newMode }),
+    });
+    queryClient.invalidateQueries();
   };
 
   const formatBtcPct = (val?: number | null) =>
@@ -848,6 +864,34 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                   {sizingMode === "flat"
                     ? "Fixed $1.00 per trade — safe for testing live orders."
                     : "Quarter-Kelly formula scales size to edge &amp; balance."}
+                </p>
+              </div>
+
+              {/* ── Sniper Mode ─────────────────────────────────────────── */}
+              <div>
+                <label className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block mb-2">Sniper Mode</label>
+                <div className="relative flex rounded-lg p-1 gap-1 bg-secondary/40 border border-border/50">
+                  {(["late", "edge", "both"] as const).map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => handleSniperModeChange(m)}
+                      className={cn(
+                        "flex-1 py-2 px-2 rounded-md text-xs font-bold font-mono tracking-wide transition-all duration-200",
+                        sniperModeLocal === m
+                          ? "bg-primary/20 text-primary border border-primary/40 shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      {m.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] font-mono mt-1.5 text-muted-foreground leading-relaxed">
+                  {sniperModeLocal === "late"
+                    ? "Enter final 5–40 s only · hold to resolution · TP at 15¢."
+                    : sniperModeLocal === "edge"
+                    ? "Enter after 1st minute · TP at 8¢ · re-enter on next edge."
+                    : "Edge snipes mid-window + late snipe in final 40 s."}
                 </p>
               </div>
 

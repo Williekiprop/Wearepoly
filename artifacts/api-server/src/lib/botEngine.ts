@@ -189,18 +189,23 @@ export async function completeBrowserOrder(
   }
 }
 
-const TEST_HOLD_MS = 30_000;  // 30 seconds minimum hold before closing a test position
+// ── Timing constants — LATE sniper mode (original behaviour) ─────────────────
+// Enter only in the final 5–40s; hold to binary resolution; TP at 15¢.
+const TEST_HOLD_MS        = 30_000;   // 30 s min hold before flip/TP in TEST mode
+const LIVE_MIN_HOLD_MS    = 30_000;   // 30 s min hold before flip/TP in LIVE mode
+const TAKE_PROFIT_MARKET_GAIN = 0.15; // 15¢ price move = take-profit (late snipe)
 
-// Take-profit: if the current Polymarket market price of our held tokens has
-// risen ≥ this many cents above our entry price, sell and lock in the gain.
-// This is a REAL executable trade (CLOB limit order at the market bid).
-// 15¢ on ~2 shares ≈ +$0.30 per trade.  After exit we immediately re-enter
-// the same direction if there's still edge and time remaining.
-const TAKE_PROFIT_MARKET_GAIN = 0.15;
+// ── Timing constants — EDGE sniper mode (mid-window sniping) ─────────────────
+// Enter after the 1st minute (≤240 s remain), exit early on TP or signal flip.
+// Multiple entries per window are allowed — re-enter after each exit.
+const EDGE_HOLD_MS        = 10_000;   // 10 s min hold before flip/TP in EDGE mode
+const EDGE_TAKE_PROFIT    = 0.08;     // 8¢ price move = take-profit (edge snipe)
 
-// Minimum time to hold a LIVE position before considering an early exit.
-// 30s gives the trade a moment to breathe; natural resolution at window end is the primary exit.
-const LIVE_MIN_HOLD_MS = 30_000; // 30 seconds
+// Entry windows per mode
+const LATE_ENTRY_MAX = 40;   // enter only when ≤ 40 s remain
+const LATE_ENTRY_MIN = 5;    // but not in the final 5 s (order may not fill)
+const EDGE_ENTRY_MAX = 240;  // enter up to 4 min from end (≥ 1 min elapsed in 5-min window)
+const EDGE_ENTRY_MIN = 41;   // don't overlap with the late-snipe zone
 
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -338,6 +343,15 @@ export async function setMinEdgeThreshold(threshold: number) {
   await db
     .update(botStateTable)
     .set({ minEdgeThreshold: threshold, lastUpdated: new Date() })
+    .where(eq(botStateTable.id, state.id));
+  return getBotState();
+}
+
+export async function setSniperMode(mode: "late" | "edge" | "both") {
+  const state = await ensureBotState();
+  await db
+    .update(botStateTable)
+    .set({ sniperMode: mode, lastUpdated: new Date() })
     .where(eq(botStateTable.id, state.id));
   return getBotState();
 }
@@ -500,13 +514,26 @@ async function runBotCycle(botId: number) {
     const winProb = isBuyUp ? probUp : 1 - probUp;
     const edge = isBuyUp ? edgeUp : -edgeUp; // always positive
 
-    // ── Late-cycle sniping: ONLY enter in the final 10–40 second window ──
-    // Entering too early gives the market time to move against us; entering
-    // in the last 5s risks the order not filling before resolution.
-    const LATE_ENTRY_MAX = 40; // don't enter when more than this many seconds remain
-    const LATE_ENTRY_MIN = 5;  // don't enter when fewer than this many seconds remain
-    const tooEarly = market5m.secondsRemaining > LATE_ENTRY_MAX;
-    const tooLate  = market5m.secondsRemaining < LATE_ENTRY_MIN;
+    // ── Entry window — varies by sniperMode ──────────────────────────────────
+    // "late": classic late-cycle snipe — enter only in final 5–40 s
+    // "edge": mid-window snipe — enter when 41–240 s remain (after 1st minute),
+    //         exit early via TP (8¢) or signal flip; multiple entries per window
+    // "both": try edge snipes mid-window AND a late snipe in the final 40 s
+    const sniperMode = freshState.sniperMode ?? "late";
+    let entryMax: number;
+    let entryMin: number;
+    if (sniperMode === "edge") {
+      entryMax = EDGE_ENTRY_MAX;
+      entryMin = EDGE_ENTRY_MIN;
+    } else if (sniperMode === "both") {
+      entryMax = EDGE_ENTRY_MAX;  // covers 5–240 s (both zones)
+      entryMin = LATE_ENTRY_MIN;
+    } else {
+      entryMax = LATE_ENTRY_MAX;
+      entryMin = LATE_ENTRY_MIN;
+    }
+    const tooEarly = market5m.secondsRemaining > entryMax;
+    const tooLate  = market5m.secondsRemaining < entryMin;
 
     let signal: "BUY_YES" | "BUY_NO" | "NO_TRADE" = "NO_TRADE";
     let positionSize = 0;
@@ -546,8 +573,8 @@ async function runBotCycle(botId: number) {
     const chg1m    = btcData.change1m >= 0 ? `+${btcData.change1m.toFixed(3)}%` : `${btcData.change1m.toFixed(3)}%`;
     if (signal === "NO_TRADE") {
       const certainSide = upPrice > downPrice ? `UP=${(upPrice*100).toFixed(1)}¢` : `DOWN=${(downPrice*100).toFixed(1)}¢`;
-      const reason = tooEarly ? `TOO_EARLY (${market5m.secondsRemaining}s left, wait for ≤${LATE_ENTRY_MAX}s)`
-        : tooLate  ? `TOO_LATE (${market5m.secondsRemaining}s left, min ${LATE_ENTRY_MIN}s)`
+      const reason = tooEarly ? `TOO_EARLY (${market5m.secondsRemaining}s left, wait for ≤${entryMax}s)`
+        : tooLate  ? `TOO_LATE (${market5m.secondsRemaining}s left, min ${entryMin}s)`
         : priceTooCertain ? `PRICE_CAP (${certainSide} > ${MAX_MARKET_CERTAINTY*100}¢ max)`
         : `edge ${edgePct}% < threshold ${(freshState.minEdgeThreshold*100).toFixed(1)}%`;
       // Throttle: with 3s cycles, log at most once per 15s to reduce noise.
@@ -574,7 +601,13 @@ async function runBotCycle(botId: number) {
     // (prices from a resolved window no longer reflect token value).
     {
       const modeStr = freshState.mode.toUpperCase();
-      const holdMinMs = freshState.mode === "test" ? TEST_HOLD_MS : LIVE_MIN_HOLD_MS;
+      const sniperModeStr = freshState.sniperMode ?? "late";
+      // Edge/Both modes use shorter holds and lower TP targets (quick profit then exit)
+      const isEdgeMode = sniperModeStr !== "late";
+      const holdMinMs = freshState.mode === "test"
+        ? (isEdgeMode ? EDGE_HOLD_MS : TEST_HOLD_MS)
+        : (isEdgeMode ? EDGE_HOLD_MS : LIVE_MIN_HOLD_MS);
+      const tpTarget = isEdgeMode ? EDGE_TAKE_PROFIT : TAKE_PROFIT_MARKET_GAIN;
       const openPositions = await db.select().from(tradesTable)
         .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, freshState.mode)));
 
@@ -595,14 +628,14 @@ async function runBotCycle(botId: number) {
             const marketGain = currentHeldPrice - entryHeldPrice;
             const dir = weBoughtUp ? "UP" : "DOWN";
             const gainCents = (marketGain * 100).toFixed(1);
-            const tpCents   = (TAKE_PROFIT_MARKET_GAIN * 100).toFixed(0);
+            const tpCents   = (tpTarget * 100).toFixed(0);
             const gainSign  = marketGain >= 0 ? "+" : "";
             console.log(
               `[5M ${modeStr}] Holding ${dir} | market ${(entryHeldPrice*100).toFixed(1)}¢ → ` +
               `${(currentHeldPrice*100).toFixed(1)}¢ (${gainSign}${gainCents}¢ of ${tpCents}¢ TP target)`
             );
 
-            if (marketGain >= TAKE_PROFIT_MARKET_GAIN) {
+            if (marketGain >= tpTarget) {
               const estPnl = pos.shares * marketGain;
               console.log(
                 `[5M ${modeStr}] Take-profit ${dir} | market +${(marketGain * 100).toFixed(1)}¢ ` +
@@ -638,7 +671,8 @@ async function runBotCycle(botId: number) {
         const heldMs = Date.now() - pos.timestamp.getTime();
         const signalFlipped = pos.direction !== direction;
 
-        if (signalFlipped && heldMs >= TEST_HOLD_MS) {
+        const flipHoldMinMs = (freshState.sniperMode ?? "late") !== "late" ? EDGE_HOLD_MS : TEST_HOLD_MS;
+        if (signalFlipped && heldMs >= flipHoldMinMs) {
           // Signal reversed after minimum hold — exit at Polymarket market price
           // (simulates selling tokens at the real bid, which barely moves in these
           // illiquid markets, giving ~$0 P&L on exit) then open the other side.
@@ -652,7 +686,7 @@ async function runBotCycle(botId: number) {
             kellyScaledPct: newSize / updatedState.balance, positionSize: newSize, shares: newShares, priceImpact: 0,
           }, btcData.currentPrice, marketId);
         } else if (signalFlipped) {
-          console.log(`[5M TEST] Flip signal (${pos.direction}→${direction}) but held only ${Math.round(heldMs/1000)}s — waiting for ${TEST_HOLD_MS/1000}s min`);
+          console.log(`[5M TEST] Flip signal (${pos.direction}→${direction}) but held only ${Math.round(heldMs/1000)}s — waiting for ${flipHoldMinMs/1000}s min`);
         }
         return;
       }
@@ -676,14 +710,15 @@ async function runBotCycle(botId: number) {
         const heldMs = Date.now() - pos.timestamp.getTime();
         const signalFlipped = pos.direction !== direction;
 
-        if (inCurrentWindow && signalFlipped && heldMs >= LIVE_MIN_HOLD_MS) {
+        const liveFlipHoldMs = (freshState.sniperMode ?? "late") !== "late" ? EDGE_HOLD_MS : LIVE_MIN_HOLD_MS;
+        if (inCurrentWindow && signalFlipped && heldMs >= liveFlipHoldMs) {
           // Signal reversed — exit current position and allow re-entry in same window
           console.log(`[LIVE] Flip signal (${pos.direction}→${direction}) after ${Math.round(heldMs/1000)}s — queuing SELL`);
           const preloadedTid = pos.direction === "YES" ? market5m.upTokenId : market5m.downTokenId;
           const flipped = await closeLivePositionEarly(botId, pos, upPrice, market5m.conditionId, "FLIP", preloadedTid);
           if (flipped) attemptedWindowEnds.delete(market5m.windowEnd); // allow re-entry this window
         } else if (inCurrentWindow && signalFlipped) {
-          console.log(`[LIVE] Flip signal (${pos.direction}→${direction}) but held only ${Math.round(heldMs/1000)}s — waiting for ${LIVE_MIN_HOLD_MS/1000}s min`);
+          console.log(`[LIVE] Flip signal (${pos.direction}→${direction}) but held only ${Math.round(heldMs/1000)}s — waiting for ${liveFlipHoldMs/1000}s min`);
         }
         // else: holding same direction (log already shown in step 3a TP check)
         return;

@@ -28,6 +28,11 @@ export const botStateTable = pgTable("bot_state", {
   dailyStopTriggered: boolean("daily_stop_triggered").notNull().default(false),
   weeklyStopTriggered: boolean("weekly_stop_triggered").notNull().default(false),
   drawdownPaused: boolean("drawdown_paused").notNull().default(false),
+  // ── Sniper mode ──────────────────────────────────────────────────────────
+  // "late"  = enter only in final 5–40s (original behaviour)
+  // "edge"  = enter when 40–240s remain, exit early on TP or signal flip
+  // "both"  = edge snipes mid-window PLUS late snipe in final 40s
+  sniperMode: text("sniper_mode", { enum: ["late", "edge", "both"] }).notNull().default("late"),
 });
 
 export const insertBotStateSchema = createInsertSchema(botStateTable).omit({ id: true });

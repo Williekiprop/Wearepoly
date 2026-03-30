@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { getBotState, startBot, stopBot, resetBot, setSizingMode, setMinEdgeThreshold, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance, resetDrawdownStops } from "../lib/botEngine.js";
+import { getBotState, startBot, stopBot, resetBot, setSizingMode, setMinEdgeThreshold, setSniperMode, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance, resetDrawdownStops } from "../lib/botEngine.js";
 import { hasProxy, setProxyUrl, getProxyDisplay, getGeoblockCooldownMs, resetGeoblockCooldown, testProxy, polyFetch } from "../lib/proxiedFetch.js";
 import { getBtcWsStatus } from "../lib/btcPrice.js";
 import { ethers } from "ethers";
@@ -54,6 +54,7 @@ function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
     // P&L derived from balance - startingBalance (always mathematically consistent,
     // avoids drift in the accumulated totalPnl column from concurrent writes).
     totalPnl: state.balance - (state.startingBalance ?? state.balance),
+    sniperMode: state.sniperMode ?? "late",
   };
 }
 
@@ -122,6 +123,16 @@ router.post("/bot/set-threshold", async (req, res): Promise<void> => {
     return;
   }
   const state = await setMinEdgeThreshold(minEdgeThreshold);
+  res.json(formatState(state));
+});
+
+router.patch("/bot/sniper-mode", async (req, res): Promise<void> => {
+  const { sniperMode } = req.body as { sniperMode: string };
+  if (!["late", "edge", "both"].includes(sniperMode)) {
+    res.status(400).json({ error: "sniperMode must be 'late', 'edge', or 'both'" });
+    return;
+  }
+  const state = await setSniperMode(sniperMode as "late" | "edge" | "both");
   res.json(formatState(state));
 });
 
