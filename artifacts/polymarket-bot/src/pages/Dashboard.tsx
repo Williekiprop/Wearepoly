@@ -82,9 +82,12 @@ export default function Dashboard() {
     if ((botData as any)?.sizingMode) setSizingModeLocal((botData as any).sizingMode);
   }, [(botData as any)?.sizingMode]);
 
-  const [thresholdInput, setThresholdInput] = useState(() => {
-    return String(((botData as any)?.minEdgeThreshold ?? 0.04) * 100);
-  });
+  const [thresholdInput, setThresholdInput] = useState("4");
+  // Sync threshold input to actual running bot value when data arrives
+  useEffect(() => {
+    const live = (botData as any)?.minEdgeThreshold;
+    if (live != null) setThresholdInput(String(+(live * 100).toFixed(2)));
+  }, [(botData as any)?.minEdgeThreshold]);
 
   const handleStart = () => {
     mutations.start.mutate({
