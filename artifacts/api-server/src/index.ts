@@ -1,6 +1,7 @@
 import app from "./app";
 import { autoResumeBot } from "./lib/botEngine.js";
 import { startBtcWebSocket } from "./lib/btcPrice.js";
+import { runMigrations } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
 
@@ -18,10 +19,11 @@ if (Number.isNaN(port) || port <= 0) {
 
 app.listen(port, "0.0.0.0", async () => {
   console.log(`Server listening on port ${port} (0.0.0.0)`);
-  // Show DB host (masked) so Render deploys can confirm the right DB is connected
   const dbUrl = process.env.DATABASE_URL ?? "";
   const dbHost = dbUrl ? dbUrl.replace(/\/\/[^@]+@/, "//***@") : "(not set)";
   console.log(`[DB] Connected to: ${dbHost}`);
+  // Ensure all schema columns exist before the bot tries to read/write them
+  await runMigrations();
   // Start the Kraken WebSocket for continuous BTC price data
   startBtcWebSocket();
   // Auto-resume the bot if it was running before the server restarted

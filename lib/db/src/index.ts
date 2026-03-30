@@ -70,10 +70,18 @@ function memDb() {
             currentMarketPrice: data.currentMarketPrice ?? null,
             lastSignal: data.lastSignal ?? null,
             kellyFraction: data.kellyFraction ?? 0.25,
-            minEdgeThreshold: data.minEdgeThreshold ?? 0.03,
+            minEdgeThreshold: data.minEdgeThreshold ?? 0.12,
             sizingMode: data.sizingMode ?? "flat",
             flatSizeUsdc: data.flatSizeUsdc ?? 1.0,
             lastUpdated: data.lastUpdated ?? now,
+            lossStreak: data.lossStreak ?? 0,
+            sizingMultiplier: data.sizingMultiplier ?? 1.0,
+            dailyStartBalance: data.dailyStartBalance ?? null,
+            weeklyStartBalance: data.weeklyStartBalance ?? null,
+            dailyStopTriggered: data.dailyStopTriggered ?? false,
+            weeklyStopTriggered: data.weeklyStopTriggered ?? false,
+            drawdownPaused: data.drawdownPaused ?? false,
+            sniperMode: data.sniperMode ?? "late",
           };
         } else {
           mem.trades.push({
@@ -134,4 +142,42 @@ export const db: ReturnType<typeof drizzle> = process.env.DATABASE_URL
 
 if (!process.env.DATABASE_URL) {
   console.warn("[DB] No DATABASE_URL — using in-memory store (data resets on restart)");
+}
+
+// ── Auto-migration (runs on every startup, idempotent) ────────────────────────
+// Adds any columns that exist in the schema but are missing from the live DB.
+// Uses IF NOT EXISTS so it is always safe to re-run.
+export async function runMigrations(): Promise<void> {
+  if (!pool) {
+    console.log("[DB] Skipping migrations — no DATABASE_URL (in-memory mode)");
+    return;
+  }
+
+  const client = await pool.connect();
+  try {
+    console.log("[DB] Running schema migrations...");
+
+    // bot_state columns added after initial deployment
+    const botStateMigrations = [
+      `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS loss_streak         INTEGER     NOT NULL DEFAULT 0`,
+      `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS sizing_multiplier   REAL        NOT NULL DEFAULT 1.0`,
+      `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS daily_start_balance REAL`,
+      `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS weekly_start_balance REAL`,
+      `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS daily_stop_triggered  BOOLEAN  NOT NULL DEFAULT false`,
+      `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS weekly_stop_triggered BOOLEAN  NOT NULL DEFAULT false`,
+      `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS drawdown_paused       BOOLEAN  NOT NULL DEFAULT false`,
+      `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS sniper_mode           TEXT     NOT NULL DEFAULT 'late'`,
+    ];
+
+    for (const sql of botStateMigrations) {
+      await client.query(sql);
+    }
+
+    console.log("[DB] Migrations complete ✓");
+  } catch (err) {
+    console.error("[DB] Migration error:", err);
+    // Don't throw — a migration failure should not crash the server
+  } finally {
+    client.release();
+  }
 }
