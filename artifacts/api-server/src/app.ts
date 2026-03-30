@@ -18,3 +18,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use("/api", router);
 
 export default app;
+
+if (!process.env.PORT) {
+  console.log("Running in Replit/local mode");
+}
