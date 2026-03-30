@@ -1,4 +1,4 @@
-import { useQueryClient, useMutation } from "@tanstack/react-query";
+import { useQueryClient, useMutation, keepPreviousData } from "@tanstack/react-query";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { 
   useGetBotStatus, 
@@ -157,10 +157,13 @@ export function useBotPolling() {
   const queryClient = useQueryClient();
 
   // 1. Poll bot status every 3 seconds always to know if it's running
+  // keepPreviousData: never clear the UI to undefined while a refetch is in
+  // flight — prevents the dot from flashing grey on every poll cycle.
   const statusQuery = useGetBotStatus({
     query: {
       refetchInterval: 3000,
       staleTime: 2000,
+      placeholderData: keepPreviousData,
     }
   });
 
@@ -171,6 +174,7 @@ export function useBotPolling() {
     query: {
       refetchInterval: isRunning ? 5000 : 15000,
       staleTime: 4000,
+      placeholderData: keepPreviousData,
     }
   });
 
@@ -179,6 +183,7 @@ export function useBotPolling() {
     query: {
       refetchInterval: 10000,
       staleTime: 9000,
+      placeholderData: keepPreviousData,
     }
   });
 

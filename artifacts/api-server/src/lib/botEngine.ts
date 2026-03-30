@@ -77,6 +77,24 @@ const NO_TRADE_LOG_THROTTLE_MS = 15_000;
 
 const browserOrderQueue: PendingBrowserOrder[] = [];
 
+// ── In-memory state cache ─────────────────────────────────────────────────────
+// The status endpoint is polled every 3 seconds. Hitting PostgreSQL over the
+// network for every poll adds 50-200ms on Render. Cache the state in memory
+// and only re-query the DB when the cache is stale or a write invalidates it.
+type BotStateRow = typeof botStateTable.$inferSelect;
+let _stateCache: BotStateRow | null = null;
+let _stateCacheTs = 0;
+const STATE_CACHE_TTL = 2000; // ms — cache reads for 2 seconds
+
+function _updateStateCache(s: BotStateRow) {
+  _stateCache = s;
+  _stateCacheTs = Date.now();
+}
+function _invalidateStateCache() {
+  _stateCacheTs = 0;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 /** Called by the API route: browser polls for the next pending order. */
 export function dequeueBrowserOrder(): PendingBrowserOrder | null {
   // Expire orders older than 50s (HMAC timestamp window)
@@ -246,12 +264,20 @@ async function ensureBotState() {
       drawdownPaused: false,
     });
     const [state] = await db.select().from(botStateTable).limit(1);
+    _updateStateCache(state);
     return state;
   }
+  _updateStateCache(existing);
   return existing;
 }
 
 export async function getBotState() {
+  // Serve from in-memory cache if still fresh — avoids a DB round-trip for
+  // every 3-second status poll (especially important on Render where the DB
+  // is a remote server and each query adds 50-200 ms of latency).
+  if (_stateCache && Date.now() - _stateCacheTs < STATE_CACHE_TTL) {
+    return _stateCache;
+  }
   return ensureBotState();
 }
 
@@ -422,13 +448,19 @@ export async function autoResumeBot() {
   if (state.running) {
     console.log(`[BOT] Auto-resuming ${state.mode.toUpperCase()} bot (balance $${state.balance?.toFixed(2)}) after restart`);
     startPolling(state.id);
-  } else if (state.totalTrades === 0) {
-    // Fresh or fully-reset state — auto-start in TEST mode so Render boots ready to trade
-    console.log(`[BOT] Auto-starting fresh TEST bot (balance $${state.balance?.toFixed(2)}) — no prior trades on record`);
-    await db.update(botStateTable).set({ running: true, lastUpdated: new Date() }).where(eq(botStateTable.id, state.id));
-    startPolling(state.id);
   } else {
-    console.log(`[BOT] STANDBY — bot was manually stopped (${state.totalTrades} prior trades). Awaiting manual start.`);
+    // Always auto-start on server restart — Render redeploys frequently and
+    // the user expects the bot to keep running. They can stop it manually.
+    // Only skip if drawdown stop is active (safety).
+    if (state.drawdownPaused) {
+      console.log(`[BOT] STANDBY — drawdown stop active. Manual start required.`);
+      return;
+    }
+    const reason = state.totalTrades === 0 ? "fresh state" : `${state.totalTrades} prior trades, resuming after restart`;
+    console.log(`[BOT] Auto-starting TEST bot (balance $${state.balance?.toFixed(2)}) — ${reason}`);
+    await db.update(botStateTable).set({ running: true, lastUpdated: new Date() }).where(eq(botStateTable.id, state.id));
+    _updateStateCache({ ...state, running: true, lastUpdated: new Date() });
+    startPolling(state.id);
   }
 }
 
