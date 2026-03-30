@@ -32,7 +32,7 @@ app.use("/api", router);
 export default app;
 
 // Catch-all (VERY IMPORTANT)
-app.get("/*", (req, res) => {
+app.use((req, res) => {
   res.sendFile(path.join(frontendPath, "index.html"));
 });
 
