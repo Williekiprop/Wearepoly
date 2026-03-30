@@ -48,3 +48,4 @@ app.listen(PORT, "0.0.0.0", () => {
 if (!process.env.PORT) {
   console.log("Running in Replit/local mode");
 }
+console.log("Serving frontend from:", frontendPath);
