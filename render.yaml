@@ -2,7 +2,7 @@ services:
   - type: web
     name: polymarket-bot
     runtime: node
-    buildCommand: pnpm install && pnpm run build
+    buildCommand: corepack enable pnpm && pnpm install && pnpm --filter @workspace/polymarket-bot run build && pnpm --filter @workspace/api-server run build
     startCommand: node artifacts/api-server/dist/index.cjs
     envVars:
       - key: NODE_ENV

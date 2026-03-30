@@ -1,0 +1,50 @@
+2026-03-30T18:39:16.635742302Z ==> Downloading cache...
+2026-03-30T18:39:16.674041832Z ==> Cloning from https://github.com/Williekiprop/Wearepoly
+2026-03-30T18:39:17.028234907Z ==> Checking out commit bbf7d740dc585f2b6a78cf060ff80a7cbd5421e9 in branch master
+2026-03-30T18:39:29.962030443Z ==> Downloaded 165MB in 6s. Extraction took 7s.
+2026-03-30T18:39:33.954809193Z ==> Using Node.js version 22.22.0 (default)
+2026-03-30T18:39:33.97891353Z ==> Docs on specifying a Node.js version: https://render.com/docs/node-version
+2026-03-30T18:39:34.101350401Z ==> Running build command 'corepack enable pnpm && pnpm install && cd artifacts/polymarket-bot && pnpm install && pnpm build && cd ../api-server && pnpm install && pnpm add tsx'...
+2026-03-30T18:39:37.472053984Z 
+2026-03-30T18:39:37.472079635Z > @workspace/polymarket-bot@0.0.0 build /opt/render/project/src/artifacts/polymarket-bot
+2026-03-30T18:39:37.472088385Z > vite build --config vite.config.ts
+2026-03-30T18:39:37.472093325Z 
+2026-03-30T18:39:37.783978147Z vite v7.3.1 building client environment for production...
+2026-03-30T18:39:37.848858164Z transforming...
+2026-03-30T18:39:37.967753175Z Found 1 warning while optimizing generated CSS:
+2026-03-30T18:39:37.967772325Z 
+2026-03-30T18:39:37.967776786Z │   }
+2026-03-30T18:39:37.967780766Z │   color-scheme: dark;
+2026-03-30T18:39:37.967784726Z │ }
+2026-03-30T18:39:37.967789786Z ┆ ^-- Unexpected end of input
+2026-03-30T18:39:37.967793806Z ┆
+2026-03-30T18:39:37.967798216Z │ @layer utilities {
+2026-03-30T18:39:37.967802126Z │   .text-glow-success {
+2026-03-30T18:39:37.967805806Z 
+2026-03-30T18:39:38.131083794Z src/components/ui/tooltip.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+2026-03-30T18:39:42.322272405Z ✓ 3091 modules transformed.
+2026-03-30T18:39:42.864444376Z rendering chunks...
+2026-03-30T18:39:42.875121075Z computing gzip size...
+2026-03-30T18:39:42.899054325Z dist/index.html                   0.75 kB │ gzip:   0.42 kB
+2026-03-30T18:39:42.899077796Z dist/assets/index-BS5W9FHy.css   97.40 kB │ gzip:  15.81 kB
+2026-03-30T18:39:42.89925099Z dist/assets/index-Eg4C1gcb.js   943.37 kB │ gzip: 277.85 kB
+2026-03-30T18:39:42.899328352Z 
+2026-03-30T18:39:42.899337182Z (!) Some chunks are larger than 500 kB after minification. Consider:
+2026-03-30T18:39:42.899341762Z - Using dynamic import() to code-split the application
+2026-03-30T18:39:42.899346242Z - Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+2026-03-30T18:39:42.899350133Z - Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+2026-03-30T18:39:42.899589268Z ✓ built in 5.08s
+2026-03-30T18:39:47.757367239Z ==> Uploading build...
+2026-03-30T18:39:59.917988087Z ==> Uploaded in 7.7s. Compression took 4.5s
+2026-03-30T18:39:59.950310135Z ==> Build successful 🎉
+2026-03-30T18:40:04.451287587Z ==> Deploying...
+2026-03-30T18:40:04.572749512Z ==> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+2026-03-30T18:40:47.749695891Z ==> Running 'cd artifacts/api-server && pnpm exec tsx src/app.ts'
+2026-03-30T18:40:48.838700711Z ! Corepack is about to download https://registry.npmjs.org/pnpm/-/pnpm-10.33.0.tgz
+2026-03-30T18:41:19.255668442Z Serving frontend from: /opt/render/project/src/artifacts/polymarket-bot/dist
+2026-03-30T18:41:19.255695352Z Dist folder exists? true
+2026-03-30T18:41:19.255699922Z index.html exists? true
+2026-03-30T18:41:29.240626954Z ==> No open ports detected, continuing to scan...
+2026-03-30T18:41:29.4111586Z ==> Docs on specifying a port: https://render.com/docs/web-services#port-binding
+2026-03-30T18:41:32.097179526Z ==> Application exited early
+2026-03-30T18:41:32.100129877Z ==> Common ways to troubleshoot your deploy: https://render.com/docs/troubleshooting-deploys
