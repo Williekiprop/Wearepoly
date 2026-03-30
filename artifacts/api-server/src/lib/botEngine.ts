@@ -200,6 +200,11 @@ const TAKE_PROFIT_MARKET_GAIN = 0.15; // 15¢ price move = take-profit (late sni
 // Multiple entries per window are allowed — re-enter after each exit.
 const EDGE_HOLD_MS        = 10_000;   // 10 s min hold before flip/TP in EDGE mode
 const EDGE_TAKE_PROFIT    = 0.08;     // 8¢ price move = take-profit (edge snipe)
+const EDGE_STOP_LOSS      = 0.12;     // 12¢ adverse move = stop-loss exit (EDGE only)
+// Slippage estimate: real CLOB fills at the ASK (buying) or BID (selling).
+// Midpoint is used for signal decisions, but we deduct ~1¢ from P&L on entry
+// to give an honest simulation of real fill costs.
+const ENTRY_SLIPPAGE      = 0.01;     // 1¢ per entry (half-spread estimate)
 
 // Entry windows per mode
 const LATE_ENTRY_MAX = 40;   // enter only when ≤ 40 s remain
@@ -651,6 +656,26 @@ async function runBotCycle(botId: number) {
               // Do NOT re-enter immediately — wait for price to pull back.
               return;
             }
+
+            // ── Stop-loss (EDGE / BOTH mode only) ────────────────────────────
+            // LATE mode holds to binary resolution — no stop-loss needed.
+            // EDGE mode enters mid-window where moves can be violent; cut losses
+            // if the market moves ≥ EDGE_STOP_LOSS cents against us.
+            if (isEdgeMode && marketGain <= -EDGE_STOP_LOSS) {
+              const estPnl = pos.shares * marketGain;
+              console.log(
+                `[5M ${modeStr}] STOP-LOSS ${dir} | market -${Math.abs(marketGain * 100).toFixed(1)}¢ ` +
+                `(${(entryHeldPrice * 100).toFixed(1)}¢ → ${(currentHeldPrice * 100).toFixed(1)}¢) | ` +
+                `est P&L $${estPnl.toFixed(4)}`
+              );
+              if (freshState.mode === "test") {
+                await closeTestPositionEarly(botId, pos, upPrice);
+              } else {
+                const preloadedTid = pos.direction === "YES" ? market5m.upTokenId : market5m.downTokenId;
+                await closeLivePositionEarly(botId, pos, upPrice, market5m.conditionId, "STOP_LOSS", preloadedTid);
+              }
+              return;
+            }
           }
         }
       }
@@ -681,8 +706,12 @@ async function runBotCycle(botId: number) {
           if (!updatedState || updatedState.balance < 1.0) return;
           const newSize  = Math.min(positionSize, updatedState.balance);
           const newShares = entryPrice > 0 ? newSize / entryPrice : 0;
+          // Apply slippage in EDGE mode: entry at ask (midpoint + 1¢) for honest simulation
+          const flipSlippedPrice = isEdgeMode
+            ? (direction === "YES" ? upPrice + ENTRY_SLIPPAGE : upPrice - ENTRY_SLIPPAGE)
+            : upPrice;
           await openTestPosition(botId, updatedState, {
-            direction, marketPrice: upPrice, edge, evPerShare,
+            direction, marketPrice: flipSlippedPrice, edge, evPerShare,
             kellyScaledPct: newSize / updatedState.balance, positionSize: newSize, shares: newShares, priceImpact: 0,
           }, btcData.currentPrice, marketId);
         } else if (signalFlipped) {
@@ -691,8 +720,12 @@ async function runBotCycle(botId: number) {
         return;
       }
 
+      // Apply slippage in EDGE mode: entry at ask (midpoint + 1¢) for honest simulation
+      const slippedMarketPrice = isEdgeMode
+        ? (direction === "YES" ? upPrice + ENTRY_SLIPPAGE : upPrice - ENTRY_SLIPPAGE)
+        : upPrice;
       await openTestPosition(botId, freshState, {
-        direction, marketPrice: upPrice, edge, evPerShare,
+        direction, marketPrice: slippedMarketPrice, edge, evPerShare,
         kellyScaledPct: positionSize / freshState.balance, positionSize, shares, priceImpact: 0,
       }, btcData.currentPrice, marketId);
     } else {
