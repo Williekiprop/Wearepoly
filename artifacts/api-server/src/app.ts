@@ -1,14 +1,20 @@
-// src/app.ts
 import path from "path";
+import { fileURLToPath } from "url";
 import express from "express";
 import cors from "cors";
 import fs from "fs";
-import router from "./routes"; // Make sure your router exports Express.Router()
+import router from "./routes";
 
 const app = express();
 
 // -----------------------------
-// 1️⃣ Frontend path (Render-ready)
+// 1️⃣ ESM-safe __dirname
+// -----------------------------
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// -----------------------------
+// 2️⃣ Frontend path
 // -----------------------------
 const frontendPath = path.join(__dirname, "../../polymarket-bot/dist");
 console.log("Serving frontend from:", frontendPath);
@@ -16,7 +22,7 @@ console.log("Dist folder exists?", fs.existsSync(frontendPath));
 console.log("index.html exists?", fs.existsSync(path.join(frontendPath, "index.html")));
 
 // -----------------------------
-// 2️⃣ Serve static frontend files
+// 3️⃣ Serve static frontend files
 // -----------------------------
 if (fs.existsSync(frontendPath)) {
   app.use(express.static(frontendPath));
@@ -25,23 +31,23 @@ if (fs.existsSync(frontendPath)) {
 }
 
 // -----------------------------
-// 3️⃣ Enable CORS
+// 4️⃣ Enable CORS
 // -----------------------------
-app.use(cors({ origin: "*" })); // Restrict later to your frontend URL
+app.use(cors({ origin: "*" }));
 
 // -----------------------------
-// 4️⃣ Parse request bodies
+// 5️⃣ Parse request bodies
 // -----------------------------
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // -----------------------------
-// 5️⃣ API routes
+// 6️⃣ API routes
 // -----------------------------
 app.use("/api", router);
 
 // -----------------------------
-// 6️⃣ Catch-all route for SPA
+// 7️⃣ Catch-all route for SPA
 // -----------------------------
 app.use((req, res) => {
   const indexPath = path.join(frontendPath, "index.html");
@@ -56,7 +62,7 @@ app.use((req, res) => {
 });
 
 // -----------------------------
-// 7️⃣ Start server
+// 8️⃣ Start server
 // -----------------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
