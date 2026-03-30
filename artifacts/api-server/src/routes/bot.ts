@@ -1,6 +1,7 @@
 import { Router, type IRouter } from "express";
 import { getBotState, startBot, stopBot, resetBot, setSizingMode, setMinEdgeThreshold, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance, resetDrawdownStops } from "../lib/botEngine.js";
 import { hasProxy, setProxyUrl, getProxyDisplay, getGeoblockCooldownMs, resetGeoblockCooldown, testProxy, polyFetch } from "../lib/proxiedFetch.js";
+import { getBtcWsStatus } from "../lib/btcPrice.js";
 import { ethers } from "ethers";
 import * as crypto from "crypto";
 
@@ -49,6 +50,8 @@ function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
     weeklyLossPct,
     dailyStartBalance: state.dailyStartBalance ?? state.balance,
     weeklyStartBalance: state.weeklyStartBalance ?? state.balance,
+    // Data source health
+    btcWs: getBtcWsStatus(),
   };
 }
 

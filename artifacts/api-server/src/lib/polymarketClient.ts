@@ -182,22 +182,45 @@ export interface FiveMinMarket {
   resolved: boolean;
 }
 
-let fiveMinCache: { market: FiveMinMarket; fetchedAt: number } | null = null;
-const FIVE_MIN_CACHE_TTL = 5_000; // 5s — price updates fast during the window
+// ── Two-layer 5m market cache ──────────────────────────────────────────────
+// Layer 1: Token IDs + window metadata from GAMMA (slow, cached per window)
+// Layer 2: Live prices from CLOB midpoint API (fast, refreshed every 2s)
+//
+// This separates stable metadata (token IDs change once per 5 minutes) from
+// rapidly-changing prices (update on every market maker move).
 
-export async function fetchCurrent5mMarket(): Promise<FiveMinMarket | null> {
-  if (fiveMinCache && Date.now() - fiveMinCache.fetchedAt < FIVE_MIN_CACHE_TTL) {
-    const m = fiveMinCache.market;
-    const secsLeft = Math.max(0, m.windowEnd - Math.floor(Date.now() / 1000));
-    return { ...m, secondsRemaining: secsLeft, resolved: secsLeft <= 0 };
+interface TokenMeta {
+  conditionId: string;
+  title: string;
+  upTokenId: string;
+  downTokenId: string;
+  windowStart: number;
+  windowEnd: number;
+}
+
+let tokenMetaCache: { meta: TokenMeta; fetchedAt: number } | null = null;
+const TOKEN_META_TTL = 240_000; // 4 minutes — token IDs are stable per window
+
+// Live price cache — updated every 2 seconds via CLOB midpoint
+let priceCache: { upPrice: number; downPrice: number; fetchedAt: number } | null = null;
+const PRICE_CACHE_TTL = 2_000; // 2 seconds — fast price refresh
+
+/** Step 1: Fetch window metadata (token IDs, conditionId) from GAMMA. Cached per window. */
+async function fetchTokenMeta(): Promise<TokenMeta | null> {
+  const now = Math.floor(Date.now() / 1000);
+  const currentWindowStart = Math.floor(now / 300) * 300;
+
+  // Use cache if it's fresh AND still within the same window
+  if (
+    tokenMetaCache &&
+    Date.now() - tokenMetaCache.fetchedAt < TOKEN_META_TTL &&
+    tokenMetaCache.meta.windowStart === currentWindowStart
+  ) {
+    return tokenMetaCache.meta;
   }
 
-  const now = Math.floor(Date.now() / 1000);
-  // Try the current window and the next one (sometimes next is already open)
-  const windows = [
-    Math.floor(now / 300) * 300,
-    Math.floor(now / 300) * 300 - 300, // previous window, in case current not created yet
-  ];
+  // Try current and previous window (Polymarket sometimes creates next window early)
+  const windows = [currentWindowStart, currentWindowStart - 300];
 
   for (const windowStart of windows) {
     const slug = `btc-updown-5m-${windowStart}`;
@@ -227,12 +250,9 @@ export async function fetchCurrent5mMarket(): Promise<FiveMinMarket | null> {
 
       const m = evt.markets[0];
       let outcomes: string[] = ["Up", "Down"];
-      let prices: number[] = [0.5, 0.5];
       let tokens: string[] = [];
       try { outcomes = JSON.parse(m.outcomes); } catch {}
-      try { prices = JSON.parse(m.outcomePrices).map(Number); } catch {}
       try { tokens = JSON.parse(m.clobTokenIds); } catch {}
-
       if (tokens.length < 2) continue;
 
       const upIdx = outcomes.findIndex(o => o.toLowerCase() === "up");
@@ -240,28 +260,82 @@ export async function fetchCurrent5mMarket(): Promise<FiveMinMarket | null> {
       if (upIdx < 0 || downIdx < 0) continue;
 
       const windowEnd = Math.round(new Date(evt.endDate ?? m.endDate).getTime() / 1000);
-      const secsLeft = Math.max(0, windowEnd - now);
 
-      const market: FiveMinMarket = {
+      const meta: TokenMeta = {
         conditionId: m.conditionId,
         title: evt.title,
         upTokenId: tokens[upIdx],
         downTokenId: tokens[downIdx],
-        upPrice: prices[upIdx] ?? 0.5,
-        downPrice: prices[downIdx] ?? 0.5,
         windowStart,
         windowEnd,
-        secondsRemaining: secsLeft,
-        resolved: secsLeft <= 0,
       };
 
-      fiveMinCache = { market, fetchedAt: Date.now() };
-      return market;
+      tokenMetaCache = { meta, fetchedAt: Date.now() };
+      // Reset price cache whenever we move to a new window
+      priceCache = null;
+      return meta;
     } catch (err) {
-      console.error(`fetchCurrent5mMarket error for ${slug}:`, err);
+      console.error(`fetchTokenMeta error for ${slug}:`, err);
     }
   }
   return null;
+}
+
+/**
+ * Step 2: Fetch live prices from CLOB midpoint API.
+ * Much faster than GAMMA (no auth, dedicated endpoint, ~50ms response).
+ * Falls back to GAMMA outcomePrices if CLOB is unavailable.
+ */
+async function fetchLivePrices(
+  upTokenId: string,
+  downTokenId: string,
+): Promise<{ upPrice: number; downPrice: number }> {
+  if (priceCache && Date.now() - priceCache.fetchedAt < PRICE_CACHE_TTL) {
+    return { upPrice: priceCache.upPrice, downPrice: priceCache.downPrice };
+  }
+
+  try {
+    // Fetch both token midpoints in parallel from CLOB (no proxy needed — not geoblocked)
+    const [upRes, downRes] = await Promise.all([
+      fetch(`${CLOB_API}/midpoint?token_id=${upTokenId}`, { signal: AbortSignal.timeout(4000) }),
+      fetch(`${CLOB_API}/midpoint?token_id=${downTokenId}`, { signal: AbortSignal.timeout(4000) }),
+    ]);
+
+    if (!upRes.ok || !downRes.ok) throw new Error("CLOB midpoint fetch failed");
+
+    const [upData, downData] = await Promise.all([
+      upRes.json() as Promise<{ mid: string }>,
+      downRes.json() as Promise<{ mid: string }>,
+    ]);
+
+    const upPrice = parseFloat(upData.mid) || 0.5;
+    const downPrice = parseFloat(downData.mid) || 0.5;
+
+    priceCache = { upPrice, downPrice, fetchedAt: Date.now() };
+    return { upPrice, downPrice };
+  } catch {
+    // Fallback: return cached prices rather than 0.5
+    if (priceCache) return { upPrice: priceCache.upPrice, downPrice: priceCache.downPrice };
+    return { upPrice: 0.5, downPrice: 0.5 };
+  }
+}
+
+export async function fetchCurrent5mMarket(): Promise<FiveMinMarket | null> {
+  const meta = await fetchTokenMeta();
+  if (!meta) return null;
+
+  const { upPrice, downPrice } = await fetchLivePrices(meta.upTokenId, meta.downTokenId);
+
+  const now = Math.floor(Date.now() / 1000);
+  const secsLeft = Math.max(0, meta.windowEnd - now);
+
+  return {
+    ...meta,
+    upPrice,
+    downPrice,
+    secondsRemaining: secsLeft,
+    resolved: secsLeft <= 0,
+  };
 }
 
 /**

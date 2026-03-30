@@ -1,5 +1,6 @@
 import app from "./app";
 import { autoResumeBot } from "./lib/botEngine.js";
+import { startBtcWebSocket } from "./lib/btcPrice.js";
 
 const rawPort = process.env["PORT"];
 
@@ -17,6 +18,8 @@ if (Number.isNaN(port) || port <= 0) {
 
 app.listen(port, async () => {
   console.log(`Server listening on port ${port}`);
+  // Start the Kraken WebSocket for continuous BTC price data
+  startBtcWebSocket();
   // Auto-resume the bot if it was running before the server restarted
   await autoResumeBot();
 });

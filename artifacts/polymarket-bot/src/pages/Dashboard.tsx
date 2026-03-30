@@ -359,6 +359,20 @@ export default function Dashboard() {
               {proxyEnabled && (
                 <span className="text-[10px] font-mono bg-green-500/15 text-green-400 border border-green-500/30 rounded px-1.5 py-0.5 tracking-wide">PROXY ON</span>
               )}
+              {(() => {
+                const ws = (botData as any)?.btcWs;
+                if (!ws) return null;
+                return (
+                  <span className={cn(
+                    "text-[10px] font-mono border rounded px-1.5 py-0.5 tracking-wide",
+                    ws.connected
+                      ? "bg-cyan-500/15 text-cyan-400 border-cyan-500/30"
+                      : "bg-muted/20 text-muted-foreground border-border"
+                  )}>
+                    {ws.connected ? "WS●" : "WS○"}
+                  </span>
+                );
+              })()}
             </div>
           </div>
         </div>

@@ -16,7 +16,7 @@
 import { db, botStateTable, tradesTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { calcKelly, simulatePriceImpact } from "./lmsr.js";
-import { getBtcPriceData, estimate5mUpProb } from "./btcPrice.js";
+import { getBtcPriceData, estimate5mUpProb, startBtcWebSocket } from "./btcPrice.js";
 import { fetchCurrent5mMarket, getConnectionStatus, type FiveMinMarket } from "./polymarketClient.js";
 import { placeOrder, prepareOrderForBrowser, getClobTokenId, getWalletBalance, redeemWinningPositions, type PreparedBrowserOrder } from "./polymarketOrder.js";
 import { hasProxy, setProxyUrl, markProxyGeoblocked } from "./proxiedFetch.js";
@@ -62,8 +62,14 @@ const pendingSellTradeIds = new Set<number>();
 const attemptedWindowEnds = new Set<number>();
 
 // Balance refresh: fetch on-chain wallet balance every N cycles and sync to DB
+// Cycle is now 3s → 20 cycles ≈ 60 seconds
 let _balanceRefreshCounter = 0;
-const BALANCE_REFRESH_EVERY_N_CYCLES = 2; // every ~60 seconds
+const BALANCE_REFRESH_EVERY_N_CYCLES = 20; // every ~60 seconds at 3s/cycle
+
+// Log throttle: suppress repeated NO_TRADE / TOO_EARLY logs
+// Only print once per 15 seconds unless in the entry window
+let _lastNoTradeLogAt = 0;
+const NO_TRADE_LOG_THROTTLE_MS = 15_000;
 
 const browserOrderQueue: PendingBrowserOrder[] = [];
 
@@ -376,7 +382,9 @@ export async function resetBot() {
 
 function startPolling(botId: number) {
   stopPolling();
-  pollingInterval = setInterval(() => runBotCycle(botId), 10_000);
+  // WebSocket feeds BTC price in real-time; cycle can be fast without rate-limit risk.
+  // 3-second cycle gives 10+ data points in the critical 10–40s entry window.
+  pollingInterval = setInterval(() => runBotCycle(botId), 3_000);
   runBotCycle(botId);
 }
 
@@ -538,7 +546,13 @@ async function runBotCycle(botId: number) {
         : tooLate  ? `TOO_LATE (${market5m.secondsRemaining}s left, min ${LATE_ENTRY_MIN}s)`
         : priceTooCertain ? `PRICE_CAP (${certainSide} > ${MAX_MARKET_CERTAINTY*100}¢ max)`
         : `edge ${edgePct}% < threshold ${(freshState.minEdgeThreshold*100).toFixed(1)}%`;
-      console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} | ${reason} | ${secStr}`);
+      // Throttle: with 3s cycles, log at most once per 15s to reduce noise.
+      // Always log if we're in (or near) the entry window.
+      const inOrNearWindow = !tooEarly;
+      if (inOrNearWindow || Date.now() - _lastNoTradeLogAt > NO_TRADE_LOG_THROTTLE_MS) {
+        _lastNoTradeLogAt = Date.now();
+        console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} | ${reason} | ${secStr}`);
+      }
     } else {
       const sizeTag = sizingMultiplier < 1 ? ` [×${sizingMultiplier} drawdown]` : "";
       const dir = isBuyUp ? "BUY_UP" : "BUY_DOWN";
