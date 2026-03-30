@@ -833,9 +833,56 @@ async function resolve5mTestPositions(botId: number, currentBtcPrice: number) {
 
     if (nowSec < info.windowEnd) continue; // window not over yet
 
-    // Determine winner: UP wins if BTC price >= price at entry
-    const entryBtc = pos.btcPriceAtEntry ?? currentBtcPrice;
-    const upWon = currentBtcPrice >= entryBtc;
+    const secsSinceClose = nowSec - info.windowEnd;
+
+    // ── Use Polymarket CLOB oracle as the primary winner source ──────────────
+    // This is the same data Polymarket uses to resolve and pay out — accurate
+    // regardless of where BTC moved after the window closed.
+    // Fall back to BTC price comparison only if the CLOB is unreachable.
+    let upWon: boolean | null = null;
+    let resolvedVia = "btc_price_fallback";
+
+    try {
+      const clobRes = await fetch(`https://clob.polymarket.com/markets/${info.conditionId}`, {
+        signal: AbortSignal.timeout(6000),
+      });
+
+      if (clobRes.ok) {
+        const clobData = await clobRes.json() as {
+          closed: boolean;
+          tokens: Array<{ token_id: string; outcome: string; price: number; winner: boolean }>;
+        };
+
+        const upToken  = clobData.tokens?.find(t => t.outcome.toLowerCase() === "up");
+        const downToken = clobData.tokens?.find(t => t.outcome.toLowerCase() === "down");
+        const upPrice   = upToken?.price ?? 0.5;
+        const downPrice = downToken?.price ?? 0.5;
+
+        // Official winner flag (set by Polymarket oracle — may lag 2-5 min)
+        if (upToken?.winner === true) {
+          upWon = true; resolvedVia = "clob_oracle";
+        } else if (downToken?.winner === true) {
+          upWon = false; resolvedVia = "clob_oracle";
+        } else if (secsSinceClose >= 30 && (upPrice >= 0.85 || downPrice >= 0.85)) {
+          // Price fallback: market makers reprice winning side to ~$1 before oracle fires
+          upWon = upPrice >= 0.85;
+          resolvedVia = `clob_price (UP=${(upPrice*100).toFixed(1)}¢, ${secsSinceClose}s since close)`;
+        } else {
+          // Oracle not yet fired, price not yet decisive — check again next cycle
+          console.log(`[5M TEST] Awaiting resolution (UP=${(upPrice*100).toFixed(1)}¢ DOWN=${(downPrice*100).toFixed(1)}¢, ${secsSinceClose}s since close)`);
+          continue;
+        }
+      }
+    } catch {
+      // CLOB unreachable — fall back to BTC price at current vs entry
+    }
+
+    // BTC price fallback: use current live price vs price at time of entry
+    if (upWon === null) {
+      const entryBtc = pos.btcPriceAtEntry ?? currentBtcPrice;
+      upWon = currentBtcPrice >= entryBtc;
+      resolvedVia = `btc_price (entry=${entryBtc.toFixed(0)} now=${currentBtcPrice.toFixed(0)})`;
+    }
 
     // Did we pick the winner?
     const weBoughtUp = pos.direction === "YES";
@@ -844,7 +891,7 @@ async function resolve5mTestPositions(botId: number, currentBtcPrice: number) {
     const entryPrice = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
     const exitValue = weWon ? 1.0 : 0.0;
     const pnl = pos.shares * (exitValue - entryPrice);
-    const returnedCapital = pos.positionSize + pnl; // 0 if lost, 2x if won big
+    const returnedCapital = pos.positionSize + pnl;
 
     const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
     if (!st) continue;
@@ -867,8 +914,7 @@ async function resolve5mTestPositions(botId: number, currentBtcPrice: number) {
     const winner = upWon ? "UP" : "DOWN";
     const result = weWon ? "WON" : "LOST";
     console.log(
-      `[5M] ${result} ${direction} position | BTC ${entryBtc.toFixed(0)} → ${currentBtcPrice.toFixed(0)} ` +
-      `(winner: ${winner}) | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`
+      `[5M TEST] ${result} ${direction} | winner=${winner} via ${resolvedVia} | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)} | balance: $${newBalance.toFixed(2)}`
     );
 
     await updateDrawdownProtection(botId, weWon, newBalance);
@@ -956,6 +1002,7 @@ async function resolve5mLivePositions(botId: number) {
       const creditedBalance = st.balance + returnedCapital;
       await db.update(botStateTable).set({
         balance: creditedBalance,
+        totalTrades: st.totalTrades + 1, // fix: was missing from LIVE resolution
         winningTrades: weWon ? st.winningTrades + 1 : st.winningTrades,
         losingTrades: weWon ? st.losingTrades : st.losingTrades + 1,
         totalPnl: st.totalPnl + pnl,
@@ -964,7 +1011,7 @@ async function resolve5mLivePositions(botId: number) {
 
       const direction = weBoughtUp ? "UP" : "DOWN";
       const result = weWon ? "WON" : "LOST";
-      console.log(`[LIVE 5M] ${result} ${direction} | shares=${effectiveShares.toFixed(2)} P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
+      console.log(`[LIVE 5M] ${result} ${direction} | shares=${effectiveShares.toFixed(2)} P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)} | balance: $${creditedBalance.toFixed(2)}`);
 
       await updateDrawdownProtection(botId, weWon, creditedBalance);
 

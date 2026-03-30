@@ -18,6 +18,10 @@ if (Number.isNaN(port) || port <= 0) {
 
 app.listen(port, async () => {
   console.log(`Server listening on port ${port}`);
+  // Show DB host (masked) so Render deploys can confirm the right DB is connected
+  const dbUrl = process.env.DATABASE_URL ?? "";
+  const dbHost = dbUrl ? dbUrl.replace(/\/\/[^@]+@/, "//***@") : "(not set)";
+  console.log(`[DB] Connected to: ${dbHost}`);
   // Start the Kraken WebSocket for continuous BTC price data
   startBtcWebSocket();
   // Auto-resume the bot if it was running before the server restarted
