@@ -1,8 +1,28 @@
+import path from "path";
 import express, { type Express } from "express";
 import cors from "cors";
 import router from "./routes";
 
 const app: Express = express();
+
+// ✅ Correct absolute path for Render
+const frontendPath = path.join(
+  process.cwd(),
+  "..",
+  "polymarket-bot",
+  "dist"
+);
+
+console.log("Frontend path:", frontendPath);
+
+// Serve static files
+app.use(express.static(frontendPath));
+
+// Catch-all (VERY IMPORTANT)
+app.get("*", (req, res) => {
+  res.sendFile(path.join(frontendPath, "index.html"));
+});
+
 
 // ✅ Allow requests from your frontend
 app.use(
