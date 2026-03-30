@@ -135,23 +135,3 @@ export const db: ReturnType<typeof drizzle> = process.env.DATABASE_URL
 if (!process.env.DATABASE_URL) {
   console.warn("[DB] No DATABASE_URL — using in-memory store (data resets on restart)");
 }
-// === KEEP PROCESS ALIVE FOR RENDER BACKGROUND WORKER ===
-console.log("🚀 Polymarket Bot started successfully on Render");
-
-setInterval(() => {
-  console.log(`[${new Date().toISOString()}] Bot heartbeat - still running`);
-}, 30000); // every 30 seconds
-
-// If your current code has a main() function or runs once, wrap it like this:
-// async function runBot() {
-//   while (true) {
-//     try {
-//       // your existing trading logic here
-//       await new Promise(resolve => setTimeout(resolve, 60000)); // adjust delay
-//     } catch (err) {
-//       console.error("Bot error:", err);
-//       await new Promise(resolve => setTimeout(resolve, 10000));
-//     }
-//   }
-// }
-// runBot().catch(console.error);

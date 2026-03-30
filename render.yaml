@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: polymarket-bot
+    runtime: node
+    buildCommand: pnpm install && pnpm run build
+    startCommand: node artifacts/api-server/dist/index.cjs
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: polymarket-bot-db
+          property: connectionString
+      - key: POLYMARKET_API_KEY
+        sync: false
+      - key: POLYMARKET_API_SECRET
+        sync: false
+      - key: POLYMARKET_API_PASSPHRASE
+        sync: false
+      - key: POLYMARKET_WALLET_KEY
+        sync: false
+      - key: PROXY_URL
+        sync: false
+
+databases:
+  - name: polymarket-bot-db
+    databaseName: polymarket_bot
+    user: polymarket_bot
