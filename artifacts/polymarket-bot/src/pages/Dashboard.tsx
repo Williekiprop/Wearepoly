@@ -415,9 +415,10 @@ export default function Dashboard({ onLogout }: DashboardProps) {
           <button
             onClick={onLogout}
             title="Sign out"
-            className="flex items-center justify-center w-9 h-9 rounded-lg border border-border/50 bg-card text-muted-foreground hover:text-destructive hover:border-destructive/50 transition-colors"
+            className="flex items-center gap-1.5 px-3 h-9 rounded-lg border border-border/50 bg-card text-muted-foreground hover:text-destructive hover:border-destructive/50 transition-colors font-mono text-xs"
           >
-            <LogOut className="w-4 h-4" />
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">SIGN OUT</span>
           </button>
         )}
         </div>
