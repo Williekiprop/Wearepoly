@@ -11,6 +11,12 @@ services:
         fromDatabase:
           name: polymarket-bot-db
           property: connectionString
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD_HASH
+        sync: false
+      - key: JWT_SECRET
+        sync: false
       - key: POLYMARKET_API_KEY
         sync: false
       - key: POLYMARKET_API_SECRET
