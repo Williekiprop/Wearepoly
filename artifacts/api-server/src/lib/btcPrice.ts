@@ -278,9 +278,7 @@ export function getBtcWsStatus(): { connected: boolean; price: number } {
  */
 export function estimate5mUpProb(btcData: BtcPriceData): number {
   const { change1m, change5m, change1h } = btcData;
-  // Weights: 1m momentum dominates; 5m trend adds context; 1h gives macro bias.
-  // 5m weight raised from 0.05 → 0.15 so sustained trends reinforce signals.
-  const momentum = change1m * 0.60 + change5m * 0.15 + change1h * 0.02;
+  const momentum = change1m * 0.60 + change5m * 0.05 + change1h * 0.02;
   return Math.min(0.95, Math.max(0.05, 0.5 + momentum));
 }
 
