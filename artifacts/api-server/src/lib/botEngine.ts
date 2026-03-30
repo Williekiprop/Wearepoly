@@ -600,6 +600,9 @@ async function runBotCycle(botId: number) {
       .set({ currentMarketPrice: upPrice, lastSignal: signal, lastUpdated: new Date() })
       .where(eq(botStateTable.id, botId));
 
+    // ── isEdgeMode: hoisted so both 3a (TP/SL) and 3b (open) blocks can use it ──
+    const isEdgeMode = (freshState.sniperMode ?? "late") !== "late";
+
     // ── Step 3a: Take-profit check (both modes; runs even in TOO_LATE / NO_TRADE) ──
     // Must happen before the NO_TRADE early-return so late-window price moves
     // are captured.  For LIVE, only fires when the position is in the current window
@@ -607,8 +610,6 @@ async function runBotCycle(botId: number) {
     {
       const modeStr = freshState.mode.toUpperCase();
       const sniperModeStr = freshState.sniperMode ?? "late";
-      // Edge/Both modes use shorter holds and lower TP targets (quick profit then exit)
-      const isEdgeMode = sniperModeStr !== "late";
       const holdMinMs = freshState.mode === "test"
         ? (isEdgeMode ? EDGE_HOLD_MS : TEST_HOLD_MS)
         : (isEdgeMode ? EDGE_HOLD_MS : LIVE_MIN_HOLD_MS);

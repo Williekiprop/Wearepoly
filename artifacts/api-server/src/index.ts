@@ -16,8 +16,8 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-app.listen(port, async () => {
-  console.log(`Server listening on port ${port}`);
+app.listen(port, "0.0.0.0", async () => {
+  console.log(`Server listening on port ${port} (0.0.0.0)`);
   // Show DB host (masked) so Render deploys can confirm the right DB is connected
   const dbUrl = process.env.DATABASE_URL ?? "";
   const dbHost = dbUrl ? dbUrl.replace(/\/\/[^@]+@/, "//***@") : "(not set)";
