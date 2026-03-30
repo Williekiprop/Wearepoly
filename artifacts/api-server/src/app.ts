@@ -4,12 +4,12 @@ import express from "express";
 const app = express();
 
 const frontendPath = path.join(
+  const frontendPath = path.join(
   process.cwd(),
   "artifacts",
   "polymarket-bot",
   "dist"
 );
-
 console.log("Frontend path:", frontendPath);
 
 // Serve static files
@@ -32,8 +32,19 @@ app.use("/api", router);
 export default app;
 
 // Catch-all (VERY IMPORTANT)
+import fs from "fs";
+
 app.use((req, res) => {
-  res.sendFile(path.join(frontendPath, "index.html"));
+  const indexPath = path.join(frontendPath, "index.html");
+
+  console.log("Trying to serve:", indexPath);
+
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    console.error("❌ index.html NOT FOUND");
+    res.status(500).send("Frontend not built");
+  }
 });
 
 const PORT = process.env.PORT || 3000;
