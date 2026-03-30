@@ -58,14 +58,41 @@ artifacts-monorepo/
 - `artifacts/api-server/src/routes/market.ts` — market analysis, BTC price, connection status
 - `artifacts/polymarket-bot/src/pages/Dashboard.tsx` — main trading UI
 
+### Signal Model
+- `probUp = 0.5 + change1m×0.60 + change5m×0.05 + change1h×0.02`
+- Default `minEdgeThreshold = 0.04` (4%) — bot only trades when model edge ≥ 4%
+- Quarter-Kelly sizing (kellyFraction=0.25) enforced by default
+- Sizing mode: `kelly` (default) or `flat`
+
+### Entry Strategy: Late-Cycle Sniping
+- Bot ONLY enters in the final **10–40 seconds** of each 5-minute window
+- `tooEarly = secondsRemaining > 40` — waits for late-window price lock-in
+- `tooLate = secondsRemaining < 5` — avoids fills missing resolution
+- Rational: late window prices reflect near-certain momentum; variance collapses
+
+### Risk Controls
+- **Drawdown protection**: daily stop at -40%, weekly stop at -60% of period starting balance
+- **Loss streak**: 5 consecutive losses → halve position size (sizingMultiplier=0.5); 7 losses → pause trading
+- **Slippage protection**: re-fetches live price before every LIVE order; skips if moved >1¢ against signal
+- **Max certainty cap**: never enter if either side >75¢ (market has priced in outcome)
+- **Continue button**: dashboard shows "Continue Trading" when paused; resets stops and resumes
+- **Price certainty cap**: `Math.max(upPrice, downPrice) > 0.75` → skip
+
+### Exit Strategy
+- Primary: natural resolution at window end (binary settlement)
+- Take-profit: exit early if price gains +15¢ on held tokens
+- Flip: exit if signal reverses after holding ≥30s
+
 ### Secrets Required
 - `POLYMARKET_API_KEY` — Polymarket API key
 - `POLYMARKET_API_SECRET` — Polymarket API secret
 - `POLYMARKET_API_PASSPHRASE` — Polymarket API passphrase
+- `POLYMARKET_WALLET_KEY` — wallet private key (for LIVE mode on-chain signing)
+- `PROXY_URL` — optional EU proxy to bypass Polymarket geoblock
 
 ### Database Tables
 - `trades` — trade history (direction, prices, P&L, mode)
-- `bot_state` — current bot state (balance, running, stats)
+- `bot_state` — current bot state (balance, running, stats, drawdown protection fields)
 
 ## TypeScript & Composite Projects
 

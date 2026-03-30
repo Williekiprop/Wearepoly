@@ -257,6 +257,20 @@ export function useBotPolling() {
     },
   });
 
+  const resetStopsMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`${API_BASE}/bot/reset-stops`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) throw new Error("Reset stops failed");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: getGetBotStatusQueryKey() });
+    },
+  });
+
   return {
     status: statusQuery,
     analysis: analysisQuery,
@@ -269,6 +283,7 @@ export function useBotPolling() {
       sizing: sizingMutation,
       proxy: proxyMutation,
       proxyTest: proxyTestMutation,
+      resetStops: resetStopsMutation,
     }
   };
 }

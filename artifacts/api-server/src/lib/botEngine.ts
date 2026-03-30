@@ -214,9 +214,16 @@ async function ensureBotState() {
       currentMarketPrice: undefined,
       lastSignal: undefined,
       kellyFraction: 0.25,
-      minEdgeThreshold: 0.003,
-      sizingMode: "flat",
+      minEdgeThreshold: 0.04,
+      sizingMode: "kelly",
       flatSizeUsdc: 1.0,
+      lossStreak: 0,
+      sizingMultiplier: 1.0,
+      dailyStartBalance: 20,
+      weeklyStartBalance: 20,
+      dailyStopTriggered: false,
+      weeklyStopTriggered: false,
+      drawdownPaused: false,
     });
     const [state] = await db.select().from(botStateTable).limit(1);
     return state;
@@ -265,8 +272,9 @@ export async function startBot(opts: {
     }
   }
 
-  const sizingMode = opts.sizingMode ?? "kelly";
+  const sizingMode = opts.sizingMode ?? "kelly"; // always Kelly by default
   const flatSizeUsdc = opts.flatSizeUsdc ?? 1.0;
+  const now = new Date();
 
   await db
     .update(botStateTable)
@@ -282,11 +290,19 @@ export async function startBot(opts: {
       currentPosition: undefined,
       currentMarketPrice: undefined,
       lastSignal: opts.mode === "live" ? "LIVE MODE — Connecting..." : "Paper trading on live feed...",
-      kellyFraction: opts.kellyFraction ?? 0.25,
-      minEdgeThreshold: opts.minEdgeThreshold ?? 0.001,
+      kellyFraction: opts.kellyFraction ?? 0.25, // Quarter-Kelly
+      minEdgeThreshold: opts.minEdgeThreshold ?? 0.04, // 4% default
       sizingMode,
       flatSizeUsdc,
-      lastUpdated: new Date(),
+      lastUpdated: now,
+      // Reset drawdown protection
+      lossStreak: 0,
+      sizingMultiplier: 1.0,
+      dailyStartBalance: initialBalance,
+      weeklyStartBalance: initialBalance,
+      dailyStopTriggered: false,
+      weeklyStopTriggered: false,
+      drawdownPaused: false,
     })
     .where(eq(botStateTable.id, state.id));
 
@@ -345,6 +361,13 @@ export async function resetBot() {
       currentMarketPrice: undefined,
       lastSignal: "Reset complete",
       lastUpdated: new Date(),
+      lossStreak: 0,
+      sizingMultiplier: 1.0,
+      dailyStartBalance: 20,
+      weeklyStartBalance: 20,
+      dailyStopTriggered: false,
+      weeklyStopTriggered: false,
+      drawdownPaused: false,
     })
     .where(eq(botStateTable.id, state.id));
   await db.delete(tradesTable);
@@ -439,6 +462,18 @@ async function runBotCycle(botId: number) {
     const [freshState] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
     if (!freshState?.running) return;
 
+    // ── Drawdown check: abort the full cycle if trading is paused ──
+    if (freshState.drawdownPaused) {
+      const reason = freshState.weeklyStopTriggered ? "WEEKLY_STOP"
+        : freshState.dailyStopTriggered ? "DAILY_STOP"
+        : `LOSS_STREAK_${freshState.lossStreak}`;
+      await db.update(botStateTable).set({
+        lastSignal: `PAUSED — ${reason} (press Continue to resume)`,
+        lastUpdated: new Date(),
+      }).where(eq(botStateTable.id, botId));
+      return;
+    }
+
     // ── Step 2: 5m market signal ──
     // prob_up = our estimated probability that BTC ends this window HIGHER
     const probUp = estimate5mUpProb(btcData);
@@ -453,32 +488,39 @@ async function runBotCycle(botId: number) {
     const winProb = isBuyUp ? probUp : 1 - probUp;
     const edge = isBuyUp ? edgeUp : -edgeUp; // always positive
 
-    // Skip if <60 seconds left in window — too late to get a good fill
-    const MIN_SECS_TO_ENTER = 60;
-    const tooLate = market5m.secondsRemaining < MIN_SECS_TO_ENTER;
+    // ── Late-cycle sniping: ONLY enter in the final 10–40 second window ──
+    // Entering too early gives the market time to move against us; entering
+    // in the last 5s risks the order not filling before resolution.
+    const LATE_ENTRY_MAX = 40; // don't enter when more than this many seconds remain
+    const LATE_ENTRY_MIN = 5;  // don't enter when fewer than this many seconds remain
+    const tooEarly = market5m.secondsRemaining > LATE_ENTRY_MAX;
+    const tooLate  = market5m.secondsRemaining < LATE_ENTRY_MIN;
 
     let signal: "BUY_YES" | "BUY_NO" | "NO_TRADE" = "NO_TRADE";
     let positionSize = 0;
     let shares = 0;
 
     // Hard cap: skip if market is already too one-sided in either direction.
-    // If UP=85¢ the market has priced in the outcome — buying DOWN at 15¢ is just as
-    // risky as buying UP at 85¢, because a few seconds can't reverse a near-certain result.
-    const MAX_MARKET_CERTAINTY = 0.75; // block when either side is above this
+    // If UP=75¢ the outcome is nearly priced in — no edge to capture.
+    const MAX_MARKET_CERTAINTY = 0.75;
     const priceTooCertain = Math.max(upPrice, downPrice) > MAX_MARKET_CERTAINTY;
 
+    // Apply sizing multiplier from drawdown protection (0.5 after 5 loss streak)
+    const sizingMultiplier = freshState.sizingMultiplier ?? 1.0;
+
     const minBalance = freshState.sizingMode === "flat" ? freshState.flatSizeUsdc : 0.5;
-    if (!tooLate && !priceTooCertain && edge >= freshState.minEdgeThreshold && freshState.balance >= minBalance) {
+    if (!tooEarly && !tooLate && !priceTooCertain && edge >= freshState.minEdgeThreshold && freshState.balance >= minBalance) {
       signal = isBuyUp ? "BUY_YES" : "BUY_NO";
 
       if (freshState.sizingMode === "flat") {
-        positionSize = Math.min(freshState.flatSizeUsdc, freshState.balance);
+        positionSize = Math.min(freshState.flatSizeUsdc * sizingMultiplier, freshState.balance);
         shares = entryPrice > 0 ? positionSize / entryPrice : 0;
       } else {
         const CLOB_MIN_ORDER = 1.0;
         const kellyFull = calcKelly(winProb, entryPrice);
-        const kellyScaled = kellyFull * freshState.kellyFraction;
-        positionSize = Math.min(Math.max(freshState.balance * kellyScaled, CLOB_MIN_ORDER), freshState.balance);
+        const kellyScaled = kellyFull * freshState.kellyFraction; // Quarter-Kelly by default
+        const rawSize = freshState.balance * kellyScaled * sizingMultiplier;
+        positionSize = Math.min(Math.max(rawSize, CLOB_MIN_ORDER), freshState.balance);
         shares = entryPrice > 0 ? positionSize / entryPrice : 0;
       }
     }
@@ -492,13 +534,15 @@ async function runBotCycle(botId: number) {
     const chg1m    = btcData.change1m >= 0 ? `+${btcData.change1m.toFixed(3)}%` : `${btcData.change1m.toFixed(3)}%`;
     if (signal === "NO_TRADE") {
       const certainSide = upPrice > downPrice ? `UP=${(upPrice*100).toFixed(1)}¢` : `DOWN=${(downPrice*100).toFixed(1)}¢`;
-      const reason = tooLate ? "TOO_LATE"
+      const reason = tooEarly ? `TOO_EARLY (${market5m.secondsRemaining}s left, wait for ≤${LATE_ENTRY_MAX}s)`
+        : tooLate  ? `TOO_LATE (${market5m.secondsRemaining}s left, min ${LATE_ENTRY_MIN}s)`
         : priceTooCertain ? `PRICE_CAP (${certainSide} > ${MAX_MARKET_CERTAINTY*100}¢ max)`
         : `edge ${edgePct}% < threshold ${(freshState.minEdgeThreshold*100).toFixed(1)}%`;
       console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} | ${reason} | ${secStr}`);
     } else {
+      const sizeTag = sizingMultiplier < 1 ? ` [×${sizingMultiplier} drawdown]` : "";
       const dir = isBuyUp ? "BUY_UP" : "BUY_DOWN";
-      console.log(`[5M] ${dir} | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} edge=+${edgePct}% size=$${positionSize.toFixed(2)} | ${secStr}`);
+      console.log(`[5M] ${dir} | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} edge=+${edgePct}% size=$${positionSize.toFixed(2)}${sizeTag} | ${secStr}`);
     }
 
     await db
@@ -664,6 +708,100 @@ async function runBotCycle(botId: number) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// DRAWDOWN PROTECTION
+// Runs after every resolved position. Updates loss streak, sizing multiplier,
+// daily/weekly drawdown checks. Pauses trading when limits are hit.
+// ──────────────────────────────────────────────────────────────────────────────
+
+const DAILY_STOP_PCT   = 0.40; // stop at -40% of daily start balance
+const WEEKLY_STOP_PCT  = 0.60; // stop at -60% of weekly start balance
+const LOSS_STREAK_HALF = 5;    // halve sizing after this many consecutive losses
+const LOSS_STREAK_STOP = 7;    // pause trading after this many consecutive losses
+
+async function updateDrawdownProtection(
+  botId: number,
+  weWon: boolean,
+  newBalance: number,
+): Promise<void> {
+  const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+  if (!st) return;
+
+  const now = new Date();
+  const todayStr = now.toISOString().slice(0, 10);
+  const weekStr  = `${now.getFullYear()}-W${Math.ceil(now.getDate() / 7)}`;
+
+  // Reset daily anchor at start of new UTC day
+  const lastUpdatedDay = st.lastUpdated?.toISOString().slice(0, 10);
+  const isNewDay = lastUpdatedDay !== todayStr;
+
+  // Reset weekly anchor at start of new week (Monday)
+  const dayOfWeek = now.getUTCDay(); // 0=Sun, 1=Mon
+  const isNewWeek = dayOfWeek === 1 && lastUpdatedDay !== todayStr; // rough weekly reset
+
+  const dailyStart  = (isNewDay  ? newBalance : (st.dailyStartBalance  ?? newBalance));
+  const weeklyStart = (isNewWeek ? newBalance : (st.weeklyStartBalance ?? newBalance));
+
+  // Loss streak
+  const newStreak = weWon ? 0 : (st.lossStreak ?? 0) + 1;
+  if (!weWon) {
+    if (newStreak === LOSS_STREAK_HALF) {
+      console.warn(`[DRAWDOWN] ${newStreak} consecutive losses — halving position size`);
+    }
+    if (newStreak >= LOSS_STREAK_STOP) {
+      console.warn(`[DRAWDOWN] ${newStreak} consecutive losses — PAUSING trading. Press "Continue" to resume.`);
+    }
+  }
+
+  // Sizing multiplier: 1.0 normally, 0.5 after LOSS_STREAK_HALF losses
+  const sizingMultiplier = newStreak >= LOSS_STREAK_HALF ? 0.5 : 1.0;
+
+  // Drawdown stops
+  const dailyDrawdown   = dailyStart > 0 ? (dailyStart - newBalance) / dailyStart : 0;
+  const weeklyDrawdown  = weeklyStart > 0 ? (weeklyStart - newBalance) / weeklyStart : 0;
+
+  const dailyTriggered  = dailyDrawdown  >= DAILY_STOP_PCT;
+  const weeklyTriggered = weeklyDrawdown >= WEEKLY_STOP_PCT;
+  const paused = newStreak >= LOSS_STREAK_STOP || dailyTriggered || weeklyTriggered;
+
+  if (dailyTriggered && !st.dailyStopTriggered) {
+    console.warn(`[DRAWDOWN] Daily stop hit (-${(dailyDrawdown*100).toFixed(1)}%) — PAUSING. Press "Continue" to override.`);
+  }
+  if (weeklyTriggered && !st.weeklyStopTriggered) {
+    console.warn(`[DRAWDOWN] Weekly stop hit (-${(weeklyDrawdown*100).toFixed(1)}%) — PAUSING. Press "Continue" to override.`);
+  }
+
+  await db.update(botStateTable).set({
+    lossStreak: newStreak,
+    sizingMultiplier,
+    dailyStartBalance:  dailyStart,
+    weeklyStartBalance: weeklyStart,
+    dailyStopTriggered:  dailyTriggered  || st.dailyStopTriggered,
+    weeklyStopTriggered: weeklyTriggered || st.weeklyStopTriggered,
+    drawdownPaused: paused,
+    lastUpdated: now,
+  }).where(eq(botStateTable.id, botId));
+
+  void weekStr; // suppress unused warning
+}
+
+/** Reset all drawdown stops and loss streaks so trading can continue. */
+export async function resetDrawdownStops(botId: number): Promise<void> {
+  const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+  if (!st) return;
+  await db.update(botStateTable).set({
+    lossStreak: 0,
+    sizingMultiplier: 1.0,
+    dailyStopTriggered: false,
+    weeklyStopTriggered: false,
+    drawdownPaused: false,
+    dailyStartBalance: st.balance,
+    weeklyStartBalance: st.balance,
+    lastUpdated: new Date(),
+  }).where(eq(botStateTable.id, botId));
+  console.log(`[DRAWDOWN] Stops reset — trading resumed from $${st.balance.toFixed(2)}`);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // 5-MINUTE RESOLUTION — TEST mode
 // After windowEnd, determine UP/DOWN winner by comparing current BTC vs entry.
 // ──────────────────────────────────────────────────────────────────────────────
@@ -701,8 +839,9 @@ async function resolve5mTestPositions(botId: number, currentBtcPrice: number) {
       status: "closed", exitPrice: exitValue, pnl, resolvedAt: new Date(),
     }).where(eq(tradesTable.id, pos.id));
 
+    const newBalance = st.balance + returnedCapital;
     await db.update(botStateTable).set({
-      balance: st.balance + returnedCapital,
+      balance: newBalance,
       totalTrades: st.totalTrades + 1,
       winningTrades: weWon ? st.winningTrades + 1 : st.winningTrades,
       losingTrades: weWon ? st.losingTrades : st.losingTrades + 1,
@@ -717,6 +856,8 @@ async function resolve5mTestPositions(botId: number, currentBtcPrice: number) {
       `[5M] ${result} ${direction} position | BTC ${entryBtc.toFixed(0)} → ${currentBtcPrice.toFixed(0)} ` +
       `(winner: ${winner}) | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`
     );
+
+    await updateDrawdownProtection(botId, weWon, newBalance);
   }
 }
 
@@ -810,6 +951,8 @@ async function resolve5mLivePositions(botId: number) {
       const direction = weBoughtUp ? "UP" : "DOWN";
       const result = weWon ? "WON" : "LOST";
       console.log(`[LIVE 5M] ${result} ${direction} | shares=${effectiveShares.toFixed(2)} P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
+
+      await updateDrawdownProtection(botId, weWon, creditedBalance);
 
       // If we won, attempt on-chain CTF redemption immediately so USDC returns
       if (weWon) {
@@ -1138,6 +1281,39 @@ async function executeLiveTrade(
   preloadedTokenId?: string,
 ): Promise<{ geoblocked: boolean }> {
   const { direction, marketPrice, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
+
+  // ── Slippage protection: re-fetch live price before placing ──
+  // If the price has moved > 1¢ against us since signal was computed, skip this trade.
+  // This guards against entering on stale signals in a fast-moving market.
+  if (conditionId) {
+    try {
+      const priceRes = await fetch(`https://clob.polymarket.com/markets/${conditionId}`, {
+        signal: AbortSignal.timeout(4000),
+      });
+      if (priceRes.ok) {
+        const priceData = await priceRes.json() as {
+          tokens?: Array<{ outcome: string; price: number }>;
+        };
+        const upToken    = priceData.tokens?.find(t => t.outcome.toLowerCase() === "up");
+        const downToken  = priceData.tokens?.find(t => t.outcome.toLowerCase() === "down");
+        const liveUpPrice = upToken?.price ?? marketPrice;
+        const liveDownPrice = downToken?.price ?? (1 - marketPrice);
+        const liveIntended = direction === "YES" ? liveUpPrice : liveDownPrice;
+        const intended     = direction === "YES" ? marketPrice  : 1 - marketPrice;
+        const slippage = liveIntended - intended; // positive = moved against us (price went up)
+        if (slippage > 0.01) {
+          console.warn(`[LIVE] Slippage protection: price moved ${(slippage * 100).toFixed(1)}¢ against us (intended ${(intended*100).toFixed(1)}¢ → live ${(liveIntended*100).toFixed(1)}¢) — skipping`);
+          return { geoblocked: false };
+        }
+        if (Math.abs(slippage) > 0.005) {
+          console.log(`[LIVE] Slight slippage: ${(slippage * 100).toFixed(1)}¢ (within tolerance)`);
+        }
+      }
+    } catch {
+      // Non-fatal: if price re-fetch fails, proceed with original signal price
+      console.warn("[LIVE] Slippage pre-check failed — proceeding with signal price");
+    }
+  }
 
   // limitPrice must be computed first — needed for 5-token minimum calculation
   const limitPrice = direction === "YES" ? marketPrice : 1 - marketPrice;

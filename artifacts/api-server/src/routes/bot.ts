@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { getBotState, startBot, stopBot, resetBot, setSizingMode, setMinEdgeThreshold, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance } from "../lib/botEngine.js";
+import { getBotState, startBot, stopBot, resetBot, setSizingMode, setMinEdgeThreshold, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance, resetDrawdownStops } from "../lib/botEngine.js";
 import { hasProxy, setProxyUrl, getProxyDisplay, getGeoblockCooldownMs, resetGeoblockCooldown, testProxy, polyFetch } from "../lib/proxiedFetch.js";
 import { ethers } from "ethers";
 import * as crypto from "crypto";
@@ -9,6 +9,15 @@ const router: IRouter = Router();
 function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
   const winRate = state.totalTrades > 0 ? state.winningTrades / state.totalTrades : 0;
   const geoblockCooldownMs = getGeoblockCooldownMs();
+
+  // Compute daily/weekly drawdown percentages for the dashboard
+  const dailyLossPct = state.dailyStartBalance && state.dailyStartBalance > 0
+    ? (state.dailyStartBalance - state.balance) / state.dailyStartBalance
+    : 0;
+  const weeklyLossPct = state.weeklyStartBalance && state.weeklyStartBalance > 0
+    ? (state.weeklyStartBalance - state.balance) / state.weeklyStartBalance
+    : 0;
+
   return {
     running: state.running,
     mode: state.mode,
@@ -30,6 +39,16 @@ function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
     geoblockCooldownMs,
     geoblockCooldownSec: Math.ceil(geoblockCooldownMs / 1000),
     lastUpdated: state.lastUpdated.toISOString(),
+    // Drawdown protection fields
+    lossStreak: state.lossStreak ?? 0,
+    sizingMultiplier: state.sizingMultiplier ?? 1.0,
+    drawdownPaused: state.drawdownPaused ?? false,
+    dailyStopTriggered: state.dailyStopTriggered ?? false,
+    weeklyStopTriggered: state.weeklyStopTriggered ?? false,
+    dailyLossPct,
+    weeklyLossPct,
+    dailyStartBalance: state.dailyStartBalance ?? state.balance,
+    weeklyStartBalance: state.weeklyStartBalance ?? state.balance,
   };
 }
 
@@ -115,6 +134,13 @@ router.post("/bot/sync-balance", async (_req, res): Promise<void> => {
   const newBalance = await syncWalletBalance();
   const state = await getBotState();
   res.json({ ...formatState(state), syncedBalance: newBalance });
+});
+
+router.post("/bot/reset-stops", async (_req, res): Promise<void> => {
+  const state = await getBotState();
+  await resetDrawdownStops(state.id);
+  const updated = await getBotState();
+  res.json(formatState(updated));
 });
 
 router.get("/bot/api-test", async (_req, res): Promise<void> => {

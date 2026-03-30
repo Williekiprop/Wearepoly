@@ -83,7 +83,7 @@ export default function Dashboard() {
   }, [(botData as any)?.sizingMode]);
 
   const [thresholdInput, setThresholdInput] = useState(() => {
-    return String(((botData as any)?.minEdgeThreshold ?? 0.01) * 100);
+    return String(((botData as any)?.minEdgeThreshold ?? 0.04) * 100);
   });
 
   const handleStart = () => {
@@ -279,6 +279,61 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* DRAWDOWN PROTECTION BANNER */}
+      {isRunning && (() => {
+        const d = botData as any;
+        const paused = d?.drawdownPaused;
+        const streak = d?.lossStreak ?? 0;
+        const sizingMul = d?.sizingMultiplier ?? 1.0;
+        const dailyLoss = (d?.dailyLossPct ?? 0) * 100;
+        const weeklyLoss = (d?.weeklyLossPct ?? 0) * 100;
+        const LOSS_STREAK_HALF = 5;
+        const isHalved = streak >= LOSS_STREAK_HALF && !paused;
+
+        if (!paused && !isHalved && streak < 3) return null;
+
+        return (
+          <div className={`border rounded-xl px-5 py-4 font-mono text-sm space-y-3 ${
+            paused
+              ? "bg-destructive/10 border-destructive/40"
+              : "bg-yellow-500/8 border-yellow-500/30"
+          }`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className={paused ? "text-destructive text-base" : "text-yellow-400 text-base"}>
+                  {paused ? "⛔" : "⚠️"}
+                </span>
+                <span className={`font-bold tracking-wide ${paused ? "text-destructive" : "text-yellow-400"}`}>
+                  {paused
+                    ? d?.weeklyStopTriggered ? "WEEKLY STOP HIT — Trading Paused"
+                      : d?.dailyStopTriggered  ? "DAILY STOP HIT — Trading Paused"
+                      : `LOSS STREAK STOP (${streak} losses) — Trading Paused`
+                    : `RISK WARNING — ${streak} consecutive losses (sizing ×${sizingMul.toFixed(1)})`}
+                </span>
+              </div>
+              {paused && (
+                <button
+                  onClick={() => mutations.resetStops.mutate()}
+                  disabled={mutations.resetStops.isPending}
+                  className="px-3 py-1.5 rounded-lg bg-green-500/20 border border-green-500/40 text-green-400 text-xs font-bold hover:bg-green-500/30 transition-colors disabled:opacity-50"
+                >
+                  {mutations.resetStops.isPending ? "Resuming..." : "▶ Continue Trading"}
+                </button>
+              )}
+            </div>
+            <div className="flex gap-6 text-xs text-muted-foreground">
+              <span>Loss streak: <span className={streak >= 7 ? "text-destructive font-bold" : streak >= 5 ? "text-yellow-400" : "text-foreground"}>{streak}</span></span>
+              <span>Daily loss: <span className={dailyLoss >= 40 ? "text-destructive font-bold" : dailyLoss >= 20 ? "text-yellow-400" : "text-foreground"}>{dailyLoss.toFixed(1)}%</span> of {dailyLoss > 0 ? `$${(d?.dailyStartBalance ?? 0).toFixed(2)}` : "—"}</span>
+              <span>Weekly loss: <span className={weeklyLoss >= 60 ? "text-destructive font-bold" : weeklyLoss >= 30 ? "text-yellow-400" : "text-foreground"}>{weeklyLoss.toFixed(1)}%</span> of {weeklyLoss > 0 ? `$${(d?.weeklyStartBalance ?? 0).toFixed(2)}` : "—"}</span>
+              <span>Sizing: <span className={sizingMul < 1 ? "text-yellow-400 font-bold" : "text-foreground"}>×{sizingMul.toFixed(1)}</span></span>
+            </div>
+            {!paused && (
+              <p className="text-xs text-muted-foreground">Position size halved. Trading will pause after {7 - streak} more consecutive loss{7 - streak === 1 ? "" : "es"}.</p>
+            )}
+          </div>
+        );
+      })()}
 
       {/* HEADER */}
       <header className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 pb-4 border-b border-border/50">

@@ -16,10 +16,18 @@ export const botStateTable = pgTable("bot_state", {
   currentMarketPrice: real("current_market_price"),
   lastSignal: text("last_signal"),
   kellyFraction: real("kelly_fraction").notNull().default(0.25),
-  minEdgeThreshold: real("min_edge_threshold").notNull().default(0.003),
+  minEdgeThreshold: real("min_edge_threshold").notNull().default(0.04),
   sizingMode: text("sizing_mode", { enum: ["flat", "kelly"] }).notNull().default("kelly"),
   flatSizeUsdc: real("flat_size_usdc").notNull().default(1.0),
   lastUpdated: timestamp("last_updated", { withTimezone: true }).notNull().defaultNow(),
+  // ── Drawdown & risk controls ──────────────────────────────────────────────
+  lossStreak: integer("loss_streak").notNull().default(0),
+  sizingMultiplier: real("sizing_multiplier").notNull().default(1.0),
+  dailyStartBalance: real("daily_start_balance"),
+  weeklyStartBalance: real("weekly_start_balance"),
+  dailyStopTriggered: boolean("daily_stop_triggered").notNull().default(false),
+  weeklyStopTriggered: boolean("weekly_stop_triggered").notNull().default(false),
+  drawdownPaused: boolean("drawdown_paused").notNull().default(false),
 });
 
 export const insertBotStateSchema = createInsertSchema(botStateTable).omit({ id: true });
