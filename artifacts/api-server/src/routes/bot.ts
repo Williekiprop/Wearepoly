@@ -24,7 +24,6 @@ function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
     mode: state.mode,
     balance: state.balance,
     startingBalance: state.startingBalance,
-    totalPnl: state.totalPnl,
     totalTrades: state.totalTrades,
     winningTrades: state.winningTrades,
     losingTrades: state.losingTrades,
@@ -52,6 +51,9 @@ function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
     weeklyStartBalance: state.weeklyStartBalance ?? state.balance,
     // Data source health
     btcWs: getBtcWsStatus(),
+    // P&L derived from balance - startingBalance (always mathematically consistent,
+    // avoids drift in the accumulated totalPnl column from concurrent writes).
+    totalPnl: state.balance - (state.startingBalance ?? state.balance),
   };
 }
 

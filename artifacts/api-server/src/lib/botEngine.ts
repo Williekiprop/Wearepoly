@@ -61,6 +61,10 @@ const pendingSellTradeIds = new Set<number>();
 // Cleared automatically when the window rolls over.
 const attemptedWindowEnds = new Set<number>();
 
+// Guards against concurrent resolution of the same trade when two bot cycles
+// overlap (possible if a CLOB query takes longer than the 3s cycle interval).
+const resolvingTradeIds = new Set<number>();
+
 // Balance refresh: fetch on-chain wallet balance every N cycles and sync to DB
 // Cycle is now 3s → 20 cycles ≈ 60 seconds
 let _balanceRefreshCounter = 0;
@@ -833,6 +837,10 @@ async function resolve5mTestPositions(botId: number, currentBtcPrice: number) {
 
     if (nowSec < info.windowEnd) continue; // window not over yet
 
+    // Guard: skip if another concurrent cycle is already resolving this trade
+    if (resolvingTradeIds.has(pos.id)) continue;
+    resolvingTradeIds.add(pos.id);
+
     const secsSinceClose = nowSec - info.windowEnd;
 
     // ── Use Polymarket CLOB oracle as the primary winner source ──────────────
@@ -870,6 +878,7 @@ async function resolve5mTestPositions(botId: number, currentBtcPrice: number) {
         } else {
           // Oracle not yet fired, price not yet decisive — check again next cycle
           console.log(`[5M TEST] Awaiting resolution (UP=${(upPrice*100).toFixed(1)}¢ DOWN=${(downPrice*100).toFixed(1)}¢, ${secsSinceClose}s since close)`);
+          resolvingTradeIds.delete(pos.id); // release so next cycle retries
           continue;
         }
       }
@@ -894,7 +903,7 @@ async function resolve5mTestPositions(botId: number, currentBtcPrice: number) {
     const returnedCapital = pos.positionSize + pnl;
 
     const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
-    if (!st) continue;
+    if (!st) { resolvingTradeIds.delete(pos.id); continue; }
 
     await db.update(tradesTable).set({
       status: "closed", exitPrice: exitValue, pnl, resolvedAt: new Date(),
@@ -909,6 +918,8 @@ async function resolve5mTestPositions(botId: number, currentBtcPrice: number) {
       totalPnl: st.totalPnl + pnl,
       lastUpdated: new Date(),
     }).where(eq(botStateTable.id, botId));
+
+    resolvingTradeIds.delete(pos.id);
 
     const direction = weBoughtUp ? "UP" : "DOWN";
     const winner = upWon ? "UP" : "DOWN";
@@ -934,12 +945,14 @@ async function resolve5mLivePositions(botId: number) {
 
   for (const pos of openLive) {
     if (pendingSellTradeIds.has(pos.id)) continue;
+    if (resolvingTradeIds.has(pos.id)) continue; // concurrent cycle guard
 
     const info = decode5mMarketId(pos.marketId ?? "");
     if (!info) continue;
 
     if (nowSec < info.windowEnd) continue; // window not done yet
 
+    resolvingTradeIds.add(pos.id);
     console.log(`[LIVE 5M] Checking resolution for trade #${pos.id} | conditionId=${info.conditionId}`);
 
     // Query CLOB to see who won — use direct fetch (market data is not geoblocked)
@@ -1049,6 +1062,8 @@ async function resolve5mLivePositions(botId: number) {
       }
     } catch (err) {
       console.error(`[LIVE 5M] resolve error for trade #${pos.id}:`, err);
+    } finally {
+      resolvingTradeIds.delete(pos.id);
     }
   }
 }
@@ -1141,110 +1156,76 @@ async function closeTestPositionEarly(
   console.log(`[5M TEST] Flip exit ${dir} @ market ${(exitPrice * 100).toFixed(1)}¢ | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// TEST MODE — Close matured positions, marked to model probability
-// ──────────────────────────────────────────────────────────────────────────────
-//
-// Why mark-to-model instead of Polymarket price?
-//   Polymarket BTC markets are ILLIQUID — the YES price barely moves between
-//   30-second cycles because no one is trading it. P&L based on that price is
-//   always ~$0. Instead, we exit at our model's estimated fair probability,
-//   which is driven by real BTC price momentum via Kraken. This gives realistic
-//   P&L: if BTC moves our way, we profit; if it moves against us, we lose.
-//
-//   Entry: real Polymarket market price (actual cost to open)
-//   Exit:  estimateTrueProb(currentBtcData) — our model's fair value
-
-async function closeMaturedTestPositions(
-  botId: number,
-  state: { id: number; balance: number; totalTrades: number; winningTrades: number; losingTrades: number; totalPnl: number },
-  currentYesPrice: number,
-  currentTrueProb: number,
-) {
-  const openPositions = await db
-    .select()
-    .from(tradesTable)
-    .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
-
-  const now = Date.now();
-  const holdMs = TEST_HOLD_MS;
-
-  for (const pos of openPositions) {
-    const age = now - pos.timestamp.getTime();
-    if (age < holdMs) continue;
-
-    // Entry price: what we actually paid per share on Polymarket
-    const entryYesPrice = pos.marketPrice;
-    const entryPrice = pos.direction === "YES" ? entryYesPrice : 1 - entryYesPrice;
-
-    // Exit fair value: model probability (driven by real BTC momentum).
-    // Polymarket price is illiquid and doesn't reflect short-term BTC moves.
-    const exitFairValue = pos.direction === "YES" ? currentTrueProb : 1 - currentTrueProb;
-
-    // P&L = shares × (exit fair value − entry cost per share)
-    const pnl = pos.shares * (exitFairValue - entryPrice);
-    const won = pnl > 0;
-
-    // exitPrice stored in DB uses model fair value for display
-    await db
-      .update(tradesTable)
-      .set({ status: "closed", exitPrice: exitFairValue, pnl, resolvedAt: new Date() })
-      .where(eq(tradesTable.id, pos.id));
-
-    const returnedCapital = pos.positionSize + pnl;
-    await db
-      .update(botStateTable)
-      .set({
-        balance: state.balance + returnedCapital,
-        totalTrades: state.totalTrades + 1,
-        winningTrades: won ? state.winningTrades + 1 : state.winningTrades,
-        losingTrades: won ? state.losingTrades : state.losingTrades + 1,
-        totalPnl: state.totalPnl + pnl,
-        lastUpdated: new Date(),
-      })
-      .where(eq(botStateTable.id, botId));
-
-    state.balance += returnedCapital;
-    state.totalTrades += 1;
-    state.totalPnl += pnl;
-    if (won) state.winningTrades += 1; else state.losingTrades += 1;
-
-    console.log(
-      `[TEST] Closed ${pos.direction} | entry ${(entryPrice * 100).toFixed(1)}¢ ` +
-      `→ model exit ${(exitFairValue * 100).toFixed(1)}¢ | ` +
-      `BTC trueProb ${(currentTrueProb * 100).toFixed(1)}% | ` +
-      `P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`
-    );
-  }
-}
-
+// Force-closes any open TEST positions when the bot is stopped or reset.
+// Uses the CLOB oracle (same as normal resolution) rather than BTC price
+// comparison, so the results are consistent with how the bot normally settles.
 async function forceCloseOpenTestPositions(botId: number) {
-  const btcData = await getBtcPriceData().catch(() => null);
-  const currentBtcPrice = btcData?.currentPrice ?? 0;
-  // Force-close by treating all open positions as if window has ended
   const openPositions = await db
     .select().from(tradesTable)
     .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "test")));
+
   for (const pos of openPositions) {
-    const entryBtc = pos.btcPriceAtEntry ?? currentBtcPrice;
-    const upWon = currentBtcPrice >= entryBtc;
-    const weBoughtUp = pos.direction === "YES";
-    const weWon = weBoughtUp ? upWon : !upWon;
-    const entryPrice = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
-    const exitValue = weWon ? 1.0 : 0.0;
-    const pnl = pos.shares * (exitValue - entryPrice);
-    await db.update(tradesTable).set({ status: "closed", exitPrice: exitValue, pnl, resolvedAt: new Date() })
-      .where(eq(tradesTable.id, pos.id));
-    const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
-    if (st) {
-      await db.update(botStateTable).set({
-        balance: st.balance + pos.positionSize + pnl,
-        totalTrades: st.totalTrades + 1,
-        winningTrades: weWon ? st.winningTrades + 1 : st.winningTrades,
-        losingTrades: weWon ? st.losingTrades : st.losingTrades + 1,
-        totalPnl: st.totalPnl + pnl,
-        lastUpdated: new Date(),
-      }).where(eq(botStateTable.id, botId));
+    if (resolvingTradeIds.has(pos.id)) continue;
+    resolvingTradeIds.add(pos.id);
+    try {
+      const info = decode5mMarketId(pos.marketId ?? "");
+      let upWon: boolean | null = null;
+
+      // Try CLOB oracle first (same as normal resolution path)
+      if (info?.conditionId) {
+        try {
+          const clobRes = await fetch(`https://clob.polymarket.com/markets/${info.conditionId}`, {
+            signal: AbortSignal.timeout(6000),
+          });
+          if (clobRes.ok) {
+            const clobData = await clobRes.json() as {
+              tokens: Array<{ outcome: string; price: number; winner: boolean }>;
+            };
+            const upToken   = clobData.tokens?.find(t => t.outcome.toLowerCase() === "up");
+            const downToken = clobData.tokens?.find(t => t.outcome.toLowerCase() === "down");
+            if (upToken?.winner === true)        { upWon = true; }
+            else if (downToken?.winner === true) { upWon = false; }
+            else if ((upToken?.price ?? 0) >= 0.85)   { upWon = true; }
+            else if ((downToken?.price ?? 0) >= 0.85) { upWon = false; }
+          }
+        } catch {
+          // fall through to BTC price fallback
+        }
+      }
+
+      // BTC price fallback
+      if (upWon === null) {
+        const btcData = await getBtcPriceData().catch(() => null);
+        const currentBtcPrice = btcData?.currentPrice ?? 0;
+        const entryBtc = pos.btcPriceAtEntry ?? currentBtcPrice;
+        upWon = currentBtcPrice >= entryBtc;
+      }
+
+      const weBoughtUp = pos.direction === "YES";
+      const weWon = weBoughtUp ? upWon : !upWon;
+      const entryPrice = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
+      const exitValue = weWon ? 1.0 : 0.0;
+      const pnl = pos.shares * (exitValue - entryPrice);
+
+      await db.update(tradesTable).set({ status: "closed", exitPrice: exitValue, pnl, resolvedAt: new Date() })
+        .where(eq(tradesTable.id, pos.id));
+
+      const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+      if (st) {
+        await db.update(botStateTable).set({
+          balance: st.balance + pos.positionSize + pnl,
+          totalTrades: st.totalTrades + 1,
+          winningTrades: weWon ? st.winningTrades + 1 : st.winningTrades,
+          losingTrades: weWon ? st.losingTrades : st.losingTrades + 1,
+          totalPnl: st.totalPnl + pnl,
+          lastUpdated: new Date(),
+        }).where(eq(botStateTable.id, botId));
+      }
+      console.log(`[TEST] Force-closed #${pos.id} ${pos.direction} | ${weWon ? "WON" : "LOST"} | P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
+    } catch (err) {
+      console.error(`[TEST] forceClose error for trade #${pos.id}:`, err);
+    } finally {
+      resolvingTradeIds.delete(pos.id);
     }
   }
 }
