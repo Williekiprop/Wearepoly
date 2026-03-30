@@ -296,6 +296,20 @@ function applyCustomBase(input: RequestInfo | URL): RequestInfo | URL {
   return `${base}${path}`;
 }
 
+/**
+ * Read the auth JWT from localStorage and return it as a Bearer header,
+ * or an empty object if no token is stored (public routes / not logged in).
+ */
+function getAuthHeader(): { Authorization: string } | Record<string, never> {
+  try {
+    if (typeof localStorage !== "undefined") {
+      const token = localStorage.getItem("AUTH_TOKEN");
+      if (token) return { Authorization: `Bearer ${token}` };
+    }
+  } catch { /* localStorage unavailable */ }
+  return {};
+}
+
 export async function customFetch<T = unknown>(
   input: RequestInfo | URL,
   options: CustomFetchOptions = {},
@@ -310,7 +324,11 @@ export async function customFetch<T = unknown>(
     throw new TypeError(`customFetch: ${method} requests cannot have a body.`);
   }
 
-  const headers = mergeHeaders(isRequest(input) ? input.headers : undefined, headersInit);
+  const headers = mergeHeaders(
+    isRequest(input) ? input.headers : undefined,
+    getAuthHeader(),
+    headersInit,
+  );
 
   if (
     typeof init.body === "string" &&

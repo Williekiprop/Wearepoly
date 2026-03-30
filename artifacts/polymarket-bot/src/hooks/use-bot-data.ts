@@ -14,6 +14,14 @@ import {
 
 const API_BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") + "/api";
 
+function authHeaders(): Record<string, string> {
+  try {
+    const token = typeof localStorage !== "undefined" ? localStorage.getItem("AUTH_TOKEN") : null;
+    if (token) return { Authorization: `Bearer ${token}` };
+  } catch { /* ignore */ }
+  return {};
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Browser-relay hook: polls server for pending LIVE orders, submits them
 // directly from the browser (which is on the user's VPN-connected machine).
@@ -34,7 +42,7 @@ export function useBrowserOrderRelay(isLive: boolean) {
     if (submitting.current) return;
 
     // Check for pending order
-    const res = await fetch(`${API_BASE}/bot/pending-order`).catch(() => null);
+    const res = await fetch(`${API_BASE}/bot/pending-order`, { headers: authHeaders() }).catch(() => null);
     if (!res?.ok) return;
     const data = await res.json() as { pending: null | {
       id: string; url: string; method: string; headers: Record<string, string>;
@@ -89,7 +97,7 @@ export function useBrowserOrderRelay(isLive: boolean) {
         console.log("[RELAY] Using server relay to:", data.pending.url);
         const relayRes = await fetch(`${API_BASE}/bot/relay-submit`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...authHeaders() },
           body: JSON.stringify({
             url: data.pending.url,
             method: data.pending.method,
@@ -126,7 +134,7 @@ export function useBrowserOrderRelay(isLive: boolean) {
     // Report result back to server (include actual fill amounts and CLOB status)
     await fetch(`${API_BASE}/bot/complete-order`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ orderId, success, errorMessage, context: data.pending.context, actualShares, clobStatus }),
     }).catch(() => null);
 
@@ -213,7 +221,7 @@ export function useBotPolling() {
 
   const proxyTestMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch(`${API_BASE}/bot/proxy/test`);
+      const res = await fetch(`${API_BASE}/bot/proxy/test`, { headers: authHeaders() });
       if (!res.ok) throw new Error("Proxy test failed");
       return res.json() as Promise<{
         proxyIp: string | null;
@@ -231,7 +239,7 @@ export function useBotPolling() {
     mutationFn: async (proxyUrl: string | null) => {
       const res = await fetch(`${API_BASE}/bot/proxy`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({ proxyUrl }),
       });
       if (!res.ok) throw new Error("Proxy update failed");
@@ -246,7 +254,7 @@ export function useBotPolling() {
     mutationFn: async (payload: { sizingMode: "flat" | "kelly"; flatSizeUsdc?: number }) => {
       const res = await fetch(`${API_BASE}/bot/sizing`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error("Sizing update failed");
@@ -261,7 +269,7 @@ export function useBotPolling() {
     mutationFn: async () => {
       const res = await fetch(`${API_BASE}/bot/reset-stops`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
       });
       if (!res.ok) throw new Error("Reset stops failed");
       return res.json();

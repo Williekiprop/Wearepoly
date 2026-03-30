@@ -21,7 +21,8 @@ import {
   Power, 
   Square,
   RefreshCcw,
-  Bitcoin
+  Bitcoin,
+  LogOut
 } from "lucide-react";
 import { format } from "date-fns";
 import { 
@@ -37,7 +38,11 @@ import {
 } from "recharts";
 import { motion, AnimatePresence } from "framer-motion";
 
-export default function Dashboard() {
+interface DashboardProps {
+  onLogout?: () => void;
+}
+
+export default function Dashboard({ onLogout }: DashboardProps) {
   const { status, analysis, btc, trades, mutations } = useBotPolling();
   const queryClient = useQueryClient();
   const [startBalanceInput, setStartBalanceInput] = useState("4");
@@ -101,12 +106,20 @@ export default function Dashboard() {
     });
   };
 
+  const getAuthHeader = () => {
+    try {
+      const token = typeof localStorage !== "undefined" ? localStorage.getItem("AUTH_TOKEN") : null;
+      if (token) return { Authorization: `Bearer ${token}` };
+    } catch { /* ignore */ }
+    return {};
+  };
+
   const handleThresholdUpdate = async () => {
     const val = parseFloat(thresholdInput) / 100;
     if (isNaN(val) || val <= 0 || val > 50) return;
     await fetch(`${import.meta.env.BASE_URL?.replace(/\/$/, "")}/api/bot/set-threshold`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getAuthHeader() },
       body: JSON.stringify({ minEdgeThreshold: val }),
     });
     queryClient.invalidateQueries();
@@ -377,7 +390,8 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Global BTC Ticker */}
+        {/* Global BTC Ticker + Logout */}
+        <div className="flex items-center gap-2">
         <div className="flex items-center gap-4 bg-card border border-border/50 rounded-xl px-4 py-2 shadow-lg">
           <Bitcoin className="w-5 h-5 text-warning" />
           <div className="flex flex-col">
@@ -396,6 +410,16 @@ export default function Dashboard() {
               </span>
             </div>
           </div>
+        </div>
+        {onLogout && (
+          <button
+            onClick={onLogout}
+            title="Sign out"
+            className="flex items-center justify-center w-9 h-9 rounded-lg border border-border/50 bg-card text-muted-foreground hover:text-destructive hover:border-destructive/50 transition-colors"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
+        )}
         </div>
       </header>
 
@@ -416,7 +440,7 @@ export default function Dashboard() {
               {botData?.mode === 'live' && (
                 <button
                   onClick={async () => {
-                    await fetch(`${import.meta.env.BASE_URL?.replace(/\/$/, "")}/api/bot/sync-balance`, { method: "POST" });
+                    await fetch(`${import.meta.env.BASE_URL?.replace(/\/$/, "")}/api/bot/sync-balance`, { method: "POST", headers: getAuthHeader() });
                     queryClient.invalidateQueries();
                   }}
                   className="text-[9px] font-mono text-primary/70 hover:text-primary border border-primary/20 hover:border-primary/50 rounded px-1.5 py-0.5 transition-colors"
@@ -523,7 +547,7 @@ export default function Dashboard() {
                           <span className="font-bold">⏱ Proxy geoblocked — cooldown {Math.ceil((botData as any).geoblockCooldownSec / 60)}m left</span>
                           <button
                             onClick={async () => {
-                              await fetch(`${import.meta.env.BASE_URL?.replace(/\/$/, "")}/api/bot/proxy/retry`, { method: "POST" });
+                              await fetch(`${import.meta.env.BASE_URL?.replace(/\/$/, "")}/api/bot/proxy/retry`, { method: "POST", headers: getAuthHeader() });
                               queryClient.invalidateQueries();
                             }}
                             className="ml-2 shrink-0 px-2 py-0.5 rounded bg-yellow-500/20 border border-yellow-500/40 hover:bg-yellow-500/30 text-yellow-300 font-bold text-[9px] transition-colors"
