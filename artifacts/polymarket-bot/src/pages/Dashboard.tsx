@@ -488,7 +488,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
             <ValueDisplay 
               label="Win Rate" 
               value={formatPct(botData?.winRate)} 
-              subValue={`${botData?.winningTrades}W / ${botData?.losingTrades}L`}
+              subValue={`${botData?.winningTrades ?? 0}W / ${botData?.losingTrades ?? 0}L`}
               highlight={(botData?.winRate || 0) > 0.5 ? "success" : "warning"}
             />
             <div className="p-3 bg-warning/10 rounded-full text-warning">

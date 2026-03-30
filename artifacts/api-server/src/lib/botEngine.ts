@@ -222,7 +222,7 @@ async function ensureBotState() {
   const [existing] = await db.select().from(botStateTable).limit(1);
   if (!existing) {
     await db.insert(botStateTable).values({
-      running: false,
+      running: true,   // auto-start in TEST mode on fresh deployment
       mode: "test",
       balance: 20,
       startingBalance: 20,
@@ -234,7 +234,7 @@ async function ensureBotState() {
       currentMarketPrice: undefined,
       lastSignal: undefined,
       kellyFraction: 0.25,
-      minEdgeThreshold: 0.04,
+      minEdgeThreshold: 0.12,  // data-driven default (see trade analysis)
       sizingMode: "kelly",
       flatSizeUsdc: 1.0,
       lossStreak: 0,
@@ -418,7 +418,8 @@ function startPolling(botId: number) {
 export async function autoResumeBot() {
   const state = await ensureBotState();
   if (state.running && pollingInterval === null) {
-    console.log(`[BOT] Auto-resuming ${state.mode.toUpperCase()} bot (balance $${state.balance?.toFixed(2)}) after restart`);
+    const label = state.totalTrades === 0 ? "Auto-starting fresh" : "Auto-resuming";
+    console.log(`[BOT] ${label} ${state.mode.toUpperCase()} bot (balance $${state.balance?.toFixed(2)}) after restart`);
     startPolling(state.id);
   }
 }
