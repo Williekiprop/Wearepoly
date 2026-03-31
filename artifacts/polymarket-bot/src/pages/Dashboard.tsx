@@ -1354,14 +1354,17 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                       </TerminalBadge>
                     </td>
                     <td className="px-4 py-3 flex gap-1 items-center">
-                      <TerminalBadge variant={trade.status === 'open' ? 'warning' : 'default'} className="bg-transparent">
+                      <TerminalBadge variant={trade.status === 'open' ? 'warning' : trade.status === 'cancelled' ? 'default' : 'default'} className="bg-transparent">
                         {trade.status}
                       </TerminalBadge>
                       {(trade as { mode?: string }).mode === 'live' && (
                         <TerminalBadge variant="danger" className="text-[9px] px-1">LIVE</TerminalBadge>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right">{formatCurrency(trade.marketPrice)}</td>
+                    <td className="px-4 py-3 text-right font-mono">
+                      {/* Show direction-adjusted entry price: UP trades buy YES token, DOWN trades buy NO token (1 - marketPrice) */}
+                      {((trade.direction === 'NO' ? 1 - trade.marketPrice : trade.marketPrice) * 100).toFixed(1)}¢
+                    </td>
                     <td className="px-4 py-3 text-right text-success">{formatPct(trade.edge)}</td>
                     <td className="px-4 py-3 text-right">{formatCurrency(trade.positionSize)}</td>
                     <td className="px-4 py-3 text-right text-muted-foreground">{formatPct(trade.priceImpact)}</td>
@@ -1376,8 +1379,10 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                               // Decode windowEnd from marketId (format: btc5m:{windowEnd}:{conditionId})
                               const windowEnd = parseInt((trade.marketId ?? '').split(':')[1] ?? '0');
                               const nowSec = Math.floor(Date.now() / 1000);
-                              if (windowEnd > 0 && nowSec > windowEnd + 30) {
-                                return <span className="text-orange-400 font-mono text-xs animate-pulse">AWAITING...</span>;
+                              if (windowEnd > 0 && nowSec > windowEnd) {
+                                const secsSince = nowSec - windowEnd;
+                                const label = secsSince < 60 ? `${secsSince}s` : `${Math.floor(secsSince / 60)}m${secsSince % 60}s`;
+                                return <span className="text-orange-400 font-mono text-xs animate-pulse" title={`${secsSince}s after window close`}>AWAITING {label}</span>;
                               }
                             }
                             return <span className="text-warning font-mono text-xs animate-pulse">HOLDING...</span>;

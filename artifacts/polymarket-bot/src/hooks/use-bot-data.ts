@@ -199,12 +199,17 @@ export function useBotPolling() {
     }
   });
 
-  // 4. Poll trades occasionally, or invalidate on actions
+  // 4. Poll trades — fast (2s) when there are open live positions awaiting resolution, else 5s
   const tradesQuery = useGetTrades(
     { limit: 50, offset: 0 }, 
     {
       query: {
-        refetchInterval: isRunning ? 5000 : false,
+        refetchInterval: (query) => {
+          if (!isRunning) return false;
+          const data = query.state.data as { trades?: Array<{ status: string; mode?: string }> } | undefined;
+          const hasOpenLive = data?.trades?.some(t => t.status === 'open' && t.mode === 'live') ?? false;
+          return hasOpenLive ? 2000 : 5000;
+        },
       }
     }
   );

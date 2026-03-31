@@ -1239,7 +1239,7 @@ async function resolve5mLivePositions(botId: number) {
 
         // If the market is old enough that CLOB has archived it, close the trade
         // by syncing the actual wallet balance as source of truth.
-        if (secsSinceCloseEarly >= 300) {
+        if (secsSinceCloseEarly >= 90) {
           console.log(`[LIVE 5M] Trade #${pos.id} stale (${Math.floor(secsSinceCloseEarly / 60)}min past close) — closing via wallet balance sync`);
           const walletBal = await getWalletBalance();
           const [st2] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
@@ -1280,20 +1280,20 @@ async function resolve5mLivePositions(botId: number) {
       const upPrice = upToken?.price ?? 0.5;
       const downPrice = downToken?.price ?? 0.5;
 
-      // Primary: official winner flag. Fallback: price ≥ 0.85 after window closed ≥ 30s
+      // Primary: official winner flag. Fallback: price ≥ 0.82 after window closed ≥ 5s
       // (Polymarket's oracle can lag 2-5 min; prices already reflect the winner by then)
       const secsSinceClose = nowSec - info.windowEnd;
-      const priceResolutionOk = secsSinceClose >= 30;
-      const upWon  = upToken?.winner  === true || (priceResolutionOk && upPrice  >= 0.85);
-      const downWon = downToken?.winner === true || (priceResolutionOk && downPrice >= 0.85);
+      const priceResolutionOk = secsSinceClose >= 5;
+      const upWon  = upToken?.winner  === true || (priceResolutionOk && upPrice  >= 0.82);
+      const downWon = downToken?.winner === true || (priceResolutionOk && downPrice >= 0.82);
 
       if (!upWon && !downWon) {
         console.log(`[LIVE 5M] Market not yet resolved (closed=${clobData.closed}, UP=${(upPrice*100).toFixed(1)}¢, DOWN=${(downPrice*100).toFixed(1)}¢, ${secsSinceClose}s since close) — waiting`);
 
-        // If the oracle hasn't set winner flags after 5 min, fall back to wallet sync
+        // If the oracle hasn't set winner flags after 90s, fall back to wallet sync
         // (handles manual redemptions and oracle delays on live markets)
-        if (secsSinceClose >= 300) {
-          console.log(`[LIVE 5M] Trade #${pos.id} oracle timeout (${Math.floor(secsSinceClose / 60)}min) — closing via wallet balance sync`);
+        if (secsSinceClose >= 90) {
+          console.log(`[LIVE 5M] Trade #${pos.id} oracle timeout (${secsSinceClose}s) — closing via wallet balance sync`);
           const walletBal = await getWalletBalance();
           const [st2] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
           if (walletBal !== null && st2) {
