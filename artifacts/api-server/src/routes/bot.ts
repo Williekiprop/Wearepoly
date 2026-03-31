@@ -56,7 +56,7 @@ function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
     totalPnl: state.balance - (state.startingBalance ?? state.balance),
     sniperMode: state.sniperMode ?? "late",
     dailyTradeCount: state.dailyTradeCount ?? 0,
-    maxDailyTrades: 20,
+    maxDailyTrades: 100,
     smartExit: state.smartExit ?? true,
   };
 }

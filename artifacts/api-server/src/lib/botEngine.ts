@@ -245,7 +245,7 @@ const EDGE_ENTRY_MIN = 91;   // don't overlap with the late-snipe zone (was 41, 
 
 // Risk management constants
 const MAX_POSITION_PCT  = 0.25; // hard cap: never risk more than 25% of balance on a single trade
-const MAX_DAILY_TRADES  = 20;   // safety valve: pause new entries if ≥ 20 trades placed today
+const MAX_DAILY_TRADES  = 100;  // safety valve: pause new entries if ≥ 100 trades placed today
 
 // Smart exit threshold (LATE mode only)
 // If the model's estimated win probability for our position drops below this level

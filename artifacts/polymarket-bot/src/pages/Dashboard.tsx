@@ -340,7 +340,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
         const dailyLoss = (d?.dailyLossPct ?? 0) * 100;
         const weeklyLoss = (d?.weeklyLossPct ?? 0) * 100;
         const dailyCount = d?.dailyTradeCount ?? 0;
-        const maxDaily = d?.maxDailyTrades ?? 20;
+        const maxDaily = d?.maxDailyTrades ?? 100;
         const LOSS_STREAK_HALF = 5;
         const isHalved = streak >= LOSS_STREAK_HALF && !paused;
         const isWarning = !paused && (isHalved || streak >= 3 || dailyLoss >= 20 || weeklyLoss >= 30 || dailyCount >= maxDaily * 0.8);
@@ -369,13 +369,22 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                 </span>
               </div>
               {paused && (
-                <button
-                  onClick={() => mutations.resetStops.mutate()}
-                  disabled={mutations.resetStops.isPending}
-                  className="px-3 py-1.5 rounded-lg bg-green-500/20 border border-green-500/40 text-green-400 text-xs font-bold hover:bg-green-500/30 transition-colors disabled:opacity-50"
-                >
-                  {mutations.resetStops.isPending ? "Resuming..." : "▶ Continue Trading"}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => mutations.resetStops.mutate()}
+                    disabled={mutations.resetStops.isPending || mutations.stop.isPending}
+                    className="px-3 py-1.5 rounded-lg bg-green-500/20 border border-green-500/40 text-green-400 text-xs font-bold hover:bg-green-500/30 transition-colors disabled:opacity-50"
+                  >
+                    {mutations.resetStops.isPending ? "Resuming..." : "▶ Continue"}
+                  </button>
+                  <button
+                    onClick={() => mutations.stop.mutate()}
+                    disabled={mutations.stop.isPending || mutations.resetStops.isPending}
+                    className="px-3 py-1.5 rounded-lg bg-muted/40 border border-border/50 text-muted-foreground text-xs font-bold hover:bg-muted/60 hover:text-foreground transition-colors disabled:opacity-50"
+                  >
+                    {mutations.stop.isPending ? "Stopping..." : "↺ Restart"}
+                  </button>
+                </div>
               )}
             </div>
 
