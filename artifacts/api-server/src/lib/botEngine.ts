@@ -223,8 +223,12 @@ const EDGE_STOP_LOSS      = 0.08;     // 8¢ adverse move = stop-loss (matches T
 // Edge sweet-spot cap: trades with computed edge >22% are paradoxically bad.
 // When the model sees >22% edge, the price is so extreme that the market has
 // already priced in strong momentum the 1-minute BTC signal can't see.
-// Data: edge 19–21% → 75–90% win rate; edge 22%+ → 14–50% win rate.
-const MAX_EDGE_THRESHOLD  = 0.22;
+// Data: YES (BUY_UP): edge 22%+ → 14–50% win rate — cap at 22%.
+//       NO  (BUY_DOWN): 71–72¢ UP range → 75–83% win rate, edge 22–27% — cap at 30%.
+// Direction-aware: YES cap tighter because high-edge YES = market is right; we're wrong.
+// High-edge NO = market overshot UP; contrarian is correct.
+const MAX_EDGE_THRESHOLD_YES = 0.22;
+const MAX_EDGE_THRESHOLD_NO  = 0.30;
 // Slippage estimate: real CLOB fills at the ASK (buying) or BID (selling).
 // Midpoint is used for signal decisions, but we deduct ~1¢ from P&L on entry
 // to give an honest simulation of real fill costs.
@@ -624,11 +628,12 @@ async function runBotCycle(botId: number) {
     // Apply sizing multiplier from drawdown protection (0.5 after 5 loss streak)
     const sizingMultiplier = freshState.sizingMultiplier ?? 1.0;
 
-    // Relax the 22% edge cap when order-flow strongly confirms the direction.
-    // Normal cap blocks "chasing extreme prices when the market is right."
-    // But when OBI > 0.35 OR in-window BTC delta > 0.15%, the extreme price is
-    // Polymarket's latency lag — not the market being smarter. That IS the edge.
-    const effectiveEdgeCap = flow.flowConfirmed ? 0.38 : MAX_EDGE_THRESHOLD;
+    // Direction-aware edge cap:
+    //   YES (BUY_UP): 22% hard cap — high-edge YES means market is right, model is wrong
+    //   NO (BUY_DOWN): 30% cap — 71–72¢ NO trades historically win 75–83%; their edge is 22–27%
+    // When order-flow strongly confirms, relax further (38%) for pure latency-lag front-runs.
+    const baseEdgeCap = isBuyUp ? MAX_EDGE_THRESHOLD_YES : MAX_EDGE_THRESHOLD_NO;
+    const effectiveEdgeCap = flow.flowConfirmed ? 0.38 : baseEdgeCap;
     const edgeTooHigh = edge > effectiveEdgeCap;
     const minBalance = freshState.sizingMode === "flat" ? freshState.flatSizeUsdc : 0.5;
     if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && edge >= directionEdgeThreshold && freshState.balance >= minBalance) {
