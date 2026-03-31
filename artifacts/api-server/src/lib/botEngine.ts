@@ -871,12 +871,14 @@ async function runBotCycle(botId: number) {
       const tradeResult = await executeLiveTrade(botId, freshState, {
         direction, marketPrice: upPrice, edge, evPerShare,
         kellyScaledPct: positionSize / freshState.balance, positionSize, shares, priceImpact: 0,
-      }, btcData.currentPrice, marketId, market5m.conditionId, tokenId);
+      }, btcData.currentPrice, marketId, market5m.conditionId, tokenId, isEdgeMode);
 
-      // Mark window attempted only when order was placed or failed for a non-geoblock reason.
-      // On geoblock, leave the window open so the browser relay can still submit it,
-      // and a retry can happen if the proxy reconnects mid-window.
-      if (!tradeResult?.geoblocked) {
+      // Mark window attempted only when order was placed or failed for a non-geoblock,
+      // non-slippage reason.
+      // - Geoblock: leave open so browser relay / proxy can retry.
+      // - Slippage skip: leave open so the bot retries if price comes back into range.
+      // - Genuine attempt (success or non-retriable failure): lock the window.
+      if (!tradeResult?.geoblocked && !tradeResult?.slippageSkip) {
         attemptedWindowEnds.add(market5m.windowEnd);
         // Prune old window entries (keep only last 5)
         if (attemptedWindowEnds.size > 5) {
@@ -1488,16 +1490,19 @@ async function executeLiveTrade(
   marketId: string,
   conditionId: string | null,
   preloadedTokenId?: string,
-): Promise<{ geoblocked: boolean }> {
+  edgeMode?: boolean,
+): Promise<{ geoblocked: boolean; slippageSkip?: boolean }> {
   const { direction, marketPrice, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
 
   // ── Slippage protection: re-fetch live price before placing ──
-  // If the price has moved > 1¢ against us since signal was computed, skip this trade.
-  // This guards against entering on stale signals in a fast-moving market.
+  // LATE mode: tolerate up to 15¢ slippage — prices move fast in the final 40s
+  // and we need the edge to still be positive at the live price, not just < 1¢ drift.
+  // EDGE mode: tight 1¢ tolerance since mid-window prices are more stable.
+  const slippageLimitCents = edgeMode ? 1 : 15;
   if (conditionId) {
     try {
       const priceRes = await fetch(`https://clob.polymarket.com/markets/${conditionId}`, {
-        signal: AbortSignal.timeout(4000),
+        signal: AbortSignal.timeout(3000),
       });
       if (priceRes.ok) {
         const priceData = await priceRes.json() as {
@@ -1510,9 +1515,9 @@ async function executeLiveTrade(
         const liveIntended = direction === "YES" ? liveUpPrice : liveDownPrice;
         const intended     = direction === "YES" ? marketPrice  : 1 - marketPrice;
         const slippage = liveIntended - intended; // positive = moved against us (price went up)
-        if (slippage > 0.01) {
+        if (slippage > slippageLimitCents / 100) {
           console.warn(`[LIVE] Slippage protection: price moved ${(slippage * 100).toFixed(1)}¢ against us (intended ${(intended*100).toFixed(1)}¢ → live ${(liveIntended*100).toFixed(1)}¢) — skipping`);
-          return { geoblocked: false };
+          return { geoblocked: false, slippageSkip: true };
         }
         if (Math.abs(slippage) > 0.005) {
           console.log(`[LIVE] Slight slippage: ${(slippage * 100).toFixed(1)}¢ (within tolerance)`);
