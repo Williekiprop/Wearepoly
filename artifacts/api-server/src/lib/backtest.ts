@@ -22,9 +22,11 @@
 
 import { estimate5mUpProb } from "./btcPrice.js";
 
-// ── Strategy constants (must match botEngine.ts) ─────────────────────────────
-const MIN_SIGNAL = 0.05;   // model must be ≥5% from 50/50 to count as a signal
-const ENTRY_WINDOW_SEC = 240;   // trade when ≤240s remaining (= 60s into window)
+// ── Strategy constants — simulates LATE sniper mode ──────────────────────────
+// LATE mode: enter in final 40s (windowEnd - 20s = midpoint of 5–40s entry window).
+// MIN_SIGNAL = 8% matches LATE mode's edge threshold (not the 19–21% EDGE threshold).
+const MIN_SIGNAL = 0.08;   // model must be ≥8% edge (matches LATE mode threshold)
+const LATE_ENTRY_SEC = 20; // simulate entry 20s before window end (middle of 5–40s window)
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
 const KRAKEN    = "https://api.kraken.com";
@@ -286,16 +288,17 @@ export async function runBacktest(
     windowsSkipped:  slugs.length - resolved.length + skipped,
     durationMs: Date.now() - t0,
     entryPriceNote:
-      "Entry price assumed = 50¢ (Polymarket CLOB history not retained for resolved 5-minute markets). " +
-      "This is a best-case assumption — real live entries will often be 30–50¢ on the favoured side. " +
-      "PnL shown at 50¢ basis; live PnL will vary based on actual market price at entry time.",
+      "Simulates LATE sniper mode: signal measured at T−20s (20s before window end), held to binary resolution. " +
+      "Entry price assumed = 50¢ (Polymarket CLOB history unavailable for resolved 5-min markets). " +
+      "In LATE mode, actual entries are often 20–70¢ depending on how one-sided the market is — " +
+      "low entry prices (e.g. 25¢ on correct side) produce +75¢ profit per dollar bet.",
   };
 }
 
 // ── Per-window processing ─────────────────────────────────────────────────────
 
 function processWindow(meta: MarketMeta, candles: Map<number, number>): BacktestTrade | null {
-  const entryTimeSec  = meta.windowStart + 60; // 60s into window (240s before end)
+  const entryTimeSec  = meta.windowEnd - LATE_ENTRY_SEC; // 20s before end (LATE mode midpoint)
 
   const btcEntry      = btcPriceAt(candles, entryTimeSec);
   const btc1mAgo      = btcPriceAt(candles, entryTimeSec - 60);

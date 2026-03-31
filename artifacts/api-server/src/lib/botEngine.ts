@@ -598,43 +598,57 @@ async function runBotCycle(botId: number) {
     const tooEarly = market5m.secondsRemaining > entryMax;
     const tooLate  = market5m.secondsRemaining < entryMin;
 
+    // ── isEdgeMode: true when sniper mode is 'edge' or 'both' ──
+    // Declared here so it's available to both the entry filter block AND the TP/SL block below.
+    const isEdgeMode = (freshState.sniperMode ?? "late") !== "late";
+
     let signal: "BUY_YES" | "BUY_NO" | "NO_TRADE" = "NO_TRADE";
     let positionSize = 0;
     let shares = 0;
 
-    // Hard cap: skip if market is already too one-sided in either direction.
-    // If UP=75¢ the outcome is nearly priced in — no edge to capture.
-    const MAX_MARKET_CERTAINTY = 0.75;
-    const priceTooCertain = Math.max(upPrice, downPrice) > MAX_MARKET_CERTAINTY;
+    // ── Mode-aware entry filters ──────────────────────────────────────────────
+    //
+    // LATE mode (final 40s, hold to binary resolution):
+    //   - Prices converge toward $0/$1 in the final 40s — dead zones from EDGE data don't apply
+    //   - Lower edge threshold (8%) is sufficient: we hold to binary outcome, no SL noise
+    //   - Higher certainty cap (0.92): late-stage prices naturally push toward extremes
+    //   - No edge cap: high-edge = low market price = bigger payout on binary win
+    //
+    // EDGE mode (1–4 min before end, 8¢ SL/TP):
+    //   - Prices are mid-range and volatile — dead zone analysis applies
+    //   - Higher edge threshold required to overcome SL noise (19–21%)
+    //   - Edge cap required (market right at extremes when time remains)
 
-    // Data-driven filter: skip price zones where the model consistently loses.
-    // Updated analysis (108 closed trades):
-    //   upPrice < 0.30 (YES entries)  → 50% win rate, avg −$0.04  ← skip: extreme price, mkt momentum > our signal
-    //   upPrice 0.30–0.31             → 85.7% win rate             ← best YES entry zone, keep
-    //   upPrice 31–45¢ / 55–69¢      → 46% win rate, avg −$0.07   ← mid-range dead zone, skip
-    //   upPrice 45–55¢ / 69–75¢      → 63–75% win rate             ← tradeable
-    const inNoMansLand =
-      upPrice < 0.30 ||                                      // very cheap UP — market has already priced the BTC move
-      (upPrice >= 0.31 && upPrice <= 0.45) ||               // mid-range dead zone (YES side)
-      (upPrice >= 0.55 && upPrice <= 0.69);                 // mid-range dead zone (NO side)
+    const LATE_MIN_EDGE      = 0.08;  // 8%  — any model edge this large pays with binary resolution
+    const LATE_MAX_CERTAINTY = 0.92;  // allow up to 92¢ in LATE — final-second convergence is normal
+    const EDGE_MAX_CERTAINTY = 0.75;  // 75¢ cap in EDGE — still 4+ min of repricing risk
 
-    // Direction-aware edge threshold:
-    // YES (BUY_UP) win rate 53.6% vs NO (BUY_DOWN) win rate 61.5% across 108 trades.
-    // Require 2% more edge for YES entries to compensate for lower directional reliability.
-    const directionEdgeThreshold = isBuyUp
-      ? freshState.minEdgeThreshold + 0.02   // e.g. 21% for YES
-      : freshState.minEdgeThreshold;          // 19% for NO
+    const maxCertainty  = isEdgeMode ? EDGE_MAX_CERTAINTY : LATE_MAX_CERTAINTY;
+    const priceTooCertain = Math.max(upPrice, downPrice) > maxCertainty;
+
+    // Dead-zone filter (EDGE mode only — price zones where model consistently underperforms
+    // with 8¢ SL. These zones were calibrated on 108 EDGE mode trades and are INVALID for LATE mode
+    // where the price converges to binary in the final 40s).
+    const inNoMansLand = isEdgeMode && (
+      upPrice < 0.30 ||                        // very cheap — market momentum already baked in
+      (upPrice >= 0.31 && upPrice <= 0.45) ||  // EDGE dead zone: YES side
+      (upPrice >= 0.55 && upPrice <= 0.69)     // EDGE dead zone: NO side
+    );
+
+    // Edge threshold — LATE uses a flat 8%; EDGE uses the direction-aware stored threshold
+    const directionEdgeThreshold = isEdgeMode
+      ? (isBuyUp
+          ? freshState.minEdgeThreshold + 0.02  // 21% for YES in EDGE
+          : freshState.minEdgeThreshold)         // 19% for NO in EDGE
+      : LATE_MIN_EDGE;                           // 8% flat for LATE
 
     // Apply sizing multiplier from drawdown protection (0.5 after 5 loss streak)
     const sizingMultiplier = freshState.sizingMultiplier ?? 1.0;
 
-    // Direction-aware edge cap:
-    //   YES (BUY_UP): 22% hard cap — high-edge YES means market is right, model is wrong
-    //   NO (BUY_DOWN): 30% cap — 71–72¢ NO trades historically win 75–83%; their edge is 22–27%
-    // When order-flow strongly confirms, relax further (38%) for pure latency-lag front-runs.
+    // Edge cap — EDGE mode only (in LATE mode, high-edge = big payout from binary win)
     const baseEdgeCap = isBuyUp ? MAX_EDGE_THRESHOLD_YES : MAX_EDGE_THRESHOLD_NO;
     const effectiveEdgeCap = flow.flowConfirmed ? 0.38 : baseEdgeCap;
-    const edgeTooHigh = edge > effectiveEdgeCap;
+    const edgeTooHigh = isEdgeMode && (edge > effectiveEdgeCap);
     const minBalance = freshState.sizingMode === "flat" ? freshState.flatSizeUsdc : 0.5;
     if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && edge >= directionEdgeThreshold && freshState.balance >= minBalance) {
       signal = isBuyUp ? "BUY_YES" : "BUY_NO";
@@ -663,10 +677,10 @@ async function runBotCycle(botId: number) {
       const certainSide = upPrice > downPrice ? `UP=${(upPrice*100).toFixed(1)}¢` : `DOWN=${(downPrice*100).toFixed(1)}¢`;
       const reason = tooEarly ? `TOO_EARLY (${market5m.secondsRemaining}s left, wait for ≤${entryMax}s)`
         : tooLate  ? `TOO_LATE (${market5m.secondsRemaining}s left, min ${entryMin}s)`
-        : priceTooCertain ? `PRICE_CAP (${certainSide} > ${MAX_MARKET_CERTAINTY*100}¢ max)`
-        : inNoMansLand ? `NO_MANS_LAND (UP=${(upPrice*100).toFixed(1)}¢ — <30¢/31-45¢/55-69¢ dead zone)`
+        : priceTooCertain ? `PRICE_CAP (${certainSide} > ${(maxCertainty*100).toFixed(0)}¢ max)`
+        : inNoMansLand ? `NO_MANS_LAND (UP=${(upPrice*100).toFixed(1)}¢ — EDGE dead zone)`
         : edgeTooHigh ? `EDGE_TOO_HIGH (${edgePct}% > ${(effectiveEdgeCap*100).toFixed(0)}% cap${flow.flowConfirmed ? " [flow-confirmed cap]" : ""})`
-        : `edge ${edgePct}% < ${isBuyUp ? "YES" : "NO"} threshold ${(directionEdgeThreshold*100).toFixed(1)}%`;
+        : `edge ${edgePct}% < ${isEdgeMode ? (isBuyUp ? "YES" : "NO") + " EDGE" : "LATE"} threshold ${(directionEdgeThreshold*100).toFixed(1)}%`;
       // Throttle: with 3s cycles, log at most once per 15s to reduce noise.
       // Always log if we're in (or near) the entry window.
       const inOrNearWindow = !tooEarly;
@@ -686,9 +700,6 @@ async function runBotCycle(botId: number) {
       .update(botStateTable)
       .set({ currentMarketPrice: upPrice, lastSignal: signal, lastUpdated: new Date() })
       .where(eq(botStateTable.id, botId));
-
-    // ── isEdgeMode: hoisted so both 3a (TP/SL) and 3b (open) blocks can use it ──
-    const isEdgeMode = (freshState.sniperMode ?? "late") !== "late";
 
     // ── Step 3a: Take-profit check (both modes; runs even in TOO_LATE / NO_TRADE) ──
     // Must happen before the NO_TRADE early-return so late-window price moves
