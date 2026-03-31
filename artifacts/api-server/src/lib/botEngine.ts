@@ -78,6 +78,13 @@ const NO_TRADE_LOG_THROTTLE_MS = 15_000;
 
 const browserOrderQueue: PendingBrowserOrder[] = [];
 
+// Track BUY orders that have been dequeued by the browser relay but whose
+// completeBrowserOrder() confirmation hasn't arrived yet. This prevents the
+// race-window where the queue is empty (order popped) but the DB insert hasn't
+// happened yet, causing a second BUY to be queued for the same window.
+// Key: botId, Value: windowEnd timestamp of the in-flight BUY
+const inFlightBuyWindows = new Map<number, number>();
+
 // ── In-memory state cache ─────────────────────────────────────────────────────
 // The status endpoint is polled every 3 seconds. Hitting PostgreSQL over the
 // network for every poll adds 50-200ms on Render. Cache the state in memory
@@ -103,7 +110,22 @@ export function dequeueBrowserOrder(): PendingBrowserOrder | null {
   while (browserOrderQueue.length > 0 && now - browserOrderQueue[0].queuedAt > 50_000) {
     browserOrderQueue.shift();
   }
-  return browserOrderQueue.shift() ?? null;
+  const order = browserOrderQueue.shift() ?? null;
+  if (order && order.tradeContext.orderSide === "BUY") {
+    // Record this window as in-flight: the order is being processed by the browser
+    // but hasn't been confirmed yet. Clear any stale in-flight entry first.
+    const windowEnd = parseInt((order.tradeContext.marketId ?? "").split(":")[1] ?? "0");
+    if (windowEnd > 0) {
+      inFlightBuyWindows.set(order.botId, windowEnd);
+      // Auto-expire after 60s in case completeBrowserOrder is never called (e.g. crash)
+      setTimeout(() => {
+        if (inFlightBuyWindows.get(order.botId) === windowEnd) {
+          inFlightBuyWindows.delete(order.botId);
+        }
+      }, 60_000);
+    }
+  }
+  return order;
 }
 
 /** Called by the API route: browser reports success/failure after submitting to Polymarket. */
@@ -117,6 +139,12 @@ export async function completeBrowserOrder(
 ): Promise<void> {
   const { botId, orderSide, tradeId, entryPrice, direction, marketPrice, estimatedProb, edge, kellyScaledPct,
     positionSize, actualSizeUsdc, shares: estimatedShares, priceImpact, btcPrice, marketId } = ctx;
+
+  // Clear the in-flight tracker — this order is now confirmed (success or failure)
+  if (orderSide === "BUY") {
+    inFlightBuyWindows.delete(botId);
+  }
+
   // Use the actual USDC deducted by the CLOB (may be larger than positionSize due to min-token rule)
   const deductedUsdc = actualSizeUsdc ?? positionSize;
 
@@ -954,15 +982,33 @@ async function runBotCycle(botId: number) {
         // else: holding same direction (log already shown in step 3a TP check)
         return;
       }
+      // Guard 1: order queued in memory but not yet dequeued by relay
       const hasPendingBuy = browserOrderQueue.some(o => o.botId === botId && o.tradeContext.orderSide === "BUY");
-      if (hasPendingBuy) {
-        console.log("[LIVE] Skipping — BUY already queued, awaiting relay");
+      // Guard 2: order dequeued by relay but completeBrowserOrder() not yet called (race window)
+      const hasInFlightBuy = inFlightBuyWindows.has(botId) && inFlightBuyWindows.get(botId) === market5m.windowEnd;
+      if (hasPendingBuy || hasInFlightBuy) {
+        console.log(`[LIVE] Skipping — BUY already ${hasPendingBuy ? "queued" : "in-flight with relay"}, awaiting confirmation`);
         return;
       }
 
-      // Only attempt entry ONCE per 5-minute window (unless geoblocked — then retry is allowed)
+      // Guard 3: window already attempted (in-memory — survives across cycles but resets on restart)
       if (attemptedWindowEnds.has(market5m.windowEnd)) {
         console.log(`[LIVE] Already attempted window ${new Date(market5m.windowEnd * 1000).toISOString()} — waiting for next window`);
+        return;
+      }
+
+      // Guard 4: DB-level backstop — check for any open live position in this window
+      // Catches cases where the server restarted after placing an order (in-memory guards cleared)
+      const existingOpenInWindow = await db.select({ id: tradesTable.id, marketId: tradesTable.marketId })
+        .from(tradesTable)
+        .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "live")));
+      const windowAlreadyOpen = existingOpenInWindow.some(t => {
+        const info = decode5mMarketId(t.marketId ?? "");
+        return info && info.windowEnd === market5m.windowEnd;
+      });
+      if (windowAlreadyOpen) {
+        console.log(`[LIVE] DB check: open live position already exists for window ${new Date(market5m.windowEnd * 1000).toISOString()} — skipping`);
+        attemptedWindowEnds.add(market5m.windowEnd); // sync in-memory guard with reality
         return;
       }
 
