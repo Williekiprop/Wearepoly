@@ -36,6 +36,10 @@ export const botStateTable = pgTable("bot_state", {
   // ── Daily trade counter ───────────────────────────────────────────────────
   // Resets to 0 at UTC midnight. Trading pauses when this hits MAX_DAILY_TRADES.
   dailyTradeCount: integer("daily_trade_count").notNull().default(0),
+  // ── Smart exit toggle ─────────────────────────────────────────────────────
+  // When true (default): LATE mode exits early if model win probability reverses
+  // below 35%. When false: holds all positions to binary resolution.
+  smartExit: boolean("smart_exit").notNull().default(true),
 });
 
 export const insertBotStateSchema = createInsertSchema(botStateTable).omit({ id: true });

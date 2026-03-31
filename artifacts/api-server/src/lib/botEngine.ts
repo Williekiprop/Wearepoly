@@ -247,6 +247,11 @@ const EDGE_ENTRY_MIN = 91;   // don't overlap with the late-snipe zone (was 41, 
 const MAX_POSITION_PCT  = 0.25; // hard cap: never risk more than 25% of balance on a single trade
 const MAX_DAILY_TRADES  = 20;   // safety valve: pause new entries if ≥ 20 trades placed today
 
+// Smart exit threshold (LATE mode only)
+// If the model's estimated win probability for our position drops below this level
+// we treat the trade as reversed and exit early rather than hold to binary resolution.
+const LATE_SMART_EXIT_PROB = 0.35;  // exit if model win prob falls below 35%
+
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -394,6 +399,16 @@ export async function setMinEdgeThreshold(threshold: number) {
     .set({ minEdgeThreshold: threshold, lastUpdated: new Date() })
     .where(eq(botStateTable.id, state.id));
   return getBotState();
+}
+
+export async function setSmartExit(enabled: boolean) {
+  const [state] = await db.select().from(botStateTable).limit(1);
+  if (!state) throw new Error("Bot state not found");
+  await db.update(botStateTable).set({ smartExit: enabled, lastUpdated: new Date() }).where(eq(botStateTable.id, state.id));
+  console.log(`[BOT] Smart exit ${enabled ? "ENABLED" : "DISABLED"}`);
+  const [updated] = await db.select().from(botStateTable).limit(1);
+  _updateStateCache(updated);
+  return updated;
 }
 
 export async function setSniperMode(mode: "late" | "edge" | "both") {
@@ -659,11 +674,15 @@ async function runBotCycle(botId: number) {
     //   - Edge cap required (market right at extremes when time remains)
 
     const LATE_MIN_EDGE      = 0.08;  // 8%  — any model edge this large pays with binary resolution
-    const LATE_MAX_CERTAINTY = 0.92;  // allow up to 92¢ in LATE — final-second convergence is normal
     const EDGE_MAX_CERTAINTY = 0.75;  // 75¢ cap in EDGE — still 4+ min of repricing risk
+    // LATE mode: only enter when entry side is in the 30–80¢ sweet spot.
+    // Below 30¢ = long-shot with thin expected value; above 80¢ = overpriced, upside too small.
+    const LATE_MIN_PRICE = 0.30;
+    const LATE_MAX_PRICE = 0.80;
 
-    const maxCertainty  = isEdgeMode ? EDGE_MAX_CERTAINTY : LATE_MAX_CERTAINTY;
-    const priceTooCertain = Math.max(upPrice, downPrice) > maxCertainty;
+    const priceTooCertain = isEdgeMode
+      ? Math.max(upPrice, downPrice) > EDGE_MAX_CERTAINTY
+      : entryPrice < LATE_MIN_PRICE || entryPrice > LATE_MAX_PRICE;
 
     // Dead-zone filter (EDGE mode only — price zones where model consistently underperforms
     // with 8¢ SL. These zones were calibrated on 108 EDGE mode trades and are INVALID for LATE mode
@@ -728,7 +747,11 @@ async function runBotCycle(botId: number) {
       const certainSide = upPrice > downPrice ? `UP=${(upPrice*100).toFixed(1)}¢` : `DOWN=${(downPrice*100).toFixed(1)}¢`;
       const reason = tooEarly ? `TOO_EARLY (${market5m.secondsRemaining}s left, wait for ≤${entryMax}s)`
         : tooLate  ? `TOO_LATE (${market5m.secondsRemaining}s left, min ${entryMin}s)`
-        : priceTooCertain ? `PRICE_CAP (${certainSide} > ${(maxCertainty*100).toFixed(0)}¢ max)`
+        : priceTooCertain ? (isEdgeMode
+            ? `PRICE_CAP (${certainSide} > ${(EDGE_MAX_CERTAINTY*100).toFixed(0)}¢ max)`
+            : entryPrice < LATE_MIN_PRICE
+              ? `PRICE_LOW (entry ${(entryPrice*100).toFixed(1)}¢ < 30¢ min)`
+              : `PRICE_HIGH (entry ${(entryPrice*100).toFixed(1)}¢ > 80¢ max)`)
         : inNoMansLand ? `NO_MANS_LAND (UP=${(upPrice*100).toFixed(1)}¢ — EDGE dead zone)`
         : edgeTooHigh ? `EDGE_TOO_HIGH (${edgePct}% > ${(effectiveEdgeCap*100).toFixed(0)}% cap${flow.flowConfirmed ? " [flow-confirmed cap]" : ""})`
         : dailyLimitHit ? `DAILY_LIMIT (${freshState.dailyTradeCount ?? 0}/${MAX_DAILY_TRADES} trades today)`
@@ -826,6 +849,30 @@ async function runBotCycle(botId: number) {
                 await closeLivePositionEarly(botId, pos, upPrice, market5m.conditionId, "STOP_LOSS", preloadedTid);
               }
               return;
+            }
+
+            // ── Smart exit (LATE mode only, when enabled) ─────────────────────
+            // If the model's estimated win probability for our position has dropped
+            // below LATE_SMART_EXIT_PROB, the momentum has reversed and holding to
+            // binary resolution is likely to result in a full loss. Exit early at
+            // the current Polymarket market price to recover partial value.
+            if (!isEdgeMode && (freshState.smartExit ?? true)) {
+              const weBoughtUp = pos.direction === "YES";
+              const modelWinProb = weBoughtUp ? probUp : 1 - probUp;
+              if (modelWinProb < LATE_SMART_EXIT_PROB) {
+                const estPnl = pos.shares * marketGain;
+                console.log(
+                  `[5M ${modeStr}] SMART EXIT ${dir} | model win prob ${(modelWinProb*100).toFixed(1)}% < ${(LATE_SMART_EXIT_PROB*100).toFixed(0)}% threshold ` +
+                  `| market ${gainSign}${gainCents}¢ | est P&L $${estPnl.toFixed(4)}`
+                );
+                if (freshState.mode === "test") {
+                  await closeTestPositionEarly(botId, pos, upPrice);
+                } else {
+                  const preloadedTid = pos.direction === "YES" ? market5m.upTokenId : market5m.downTokenId;
+                  await closeLivePositionEarly(botId, pos, upPrice, market5m.conditionId, "SMART_EXIT", preloadedTid);
+                }
+                return;
+              }
             }
           }
         }

@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { getBotState, startBot, stopBot, resetBot, setSizingMode, setMinEdgeThreshold, setSniperMode, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance, resetDrawdownStops } from "../lib/botEngine.js";
+import { getBotState, startBot, stopBot, resetBot, setSizingMode, setMinEdgeThreshold, setSniperMode, setSmartExit, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance, resetDrawdownStops } from "../lib/botEngine.js";
 import { hasProxy, setProxyUrl, getProxyDisplay, getGeoblockCooldownMs, resetGeoblockCooldown, testProxy, polyFetch } from "../lib/proxiedFetch.js";
 import { getBtcWsStatus } from "../lib/btcPrice.js";
 import { ethers } from "ethers";
@@ -57,6 +57,7 @@ function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
     sniperMode: state.sniperMode ?? "late",
     dailyTradeCount: state.dailyTradeCount ?? 0,
     maxDailyTrades: 20,
+    smartExit: state.smartExit ?? true,
   };
 }
 
@@ -135,6 +136,16 @@ router.patch("/bot/sniper-mode", async (req, res): Promise<void> => {
     return;
   }
   const state = await setSniperMode(sniperMode as "late" | "edge" | "both");
+  res.json(formatState(state));
+});
+
+router.patch("/bot/smart-exit", async (req, res): Promise<void> => {
+  const { enabled } = req.body as { enabled: boolean };
+  if (typeof enabled !== "boolean") {
+    res.status(400).json({ error: "enabled must be boolean" });
+    return;
+  }
+  const state = await setSmartExit(enabled);
   res.json(formatState(state));
 });
 

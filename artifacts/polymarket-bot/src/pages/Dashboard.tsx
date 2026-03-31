@@ -51,6 +51,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
   const [mode, setMode] = useState<"test" | "live">("test");
   const [sizingMode, setSizingModeLocal] = useState<"flat" | "kelly">("flat");
   const [sniperModeLocal, setSniperModeLocal] = useState<"late" | "edge" | "both">("late");
+  const [smartExitLocal, setSmartExitLocal] = useState<boolean>(true);
   const [proxyInput, setProxyInput] = useState("");
   const [proxyApplied, setProxyApplied] = useState(false);
   const [localApiInput, setLocalApiInput] = useState(() =>
@@ -94,6 +95,11 @@ export default function Dashboard({ onLogout }: DashboardProps) {
     const m = (botData as any)?.sniperMode;
     if (m) setSniperModeLocal(m);
   }, [(botData as any)?.sniperMode]);
+
+  useEffect(() => {
+    const se = (botData as any)?.smartExit;
+    if (se !== undefined) setSmartExitLocal(Boolean(se));
+  }, [(botData as any)?.smartExit]);
 
   const [thresholdInput, setThresholdInput] = useState("4");
   // Sync threshold input to actual running bot value when data arrives
@@ -183,6 +189,17 @@ export default function Dashboard({ onLogout }: DashboardProps) {
       method: "PATCH",
       headers: { "Content-Type": "application/json", ...getAuthHeader() },
       body: JSON.stringify({ sniperMode: newMode }),
+    });
+    queryClient.invalidateQueries();
+  };
+
+  const handleSmartExitToggle = async () => {
+    const next = !smartExitLocal;
+    setSmartExitLocal(next);
+    await fetch(`${import.meta.env.BASE_URL?.replace(/\/$/, "")}/api/bot/smart-exit`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...getAuthHeader() },
+      body: JSON.stringify({ enabled: next }),
     });
     queryClient.invalidateQueries();
   };
@@ -952,10 +969,40 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                 </div>
                 <p className="text-[10px] font-mono mt-1.5 text-muted-foreground leading-relaxed">
                   {sniperModeLocal === "late"
-                    ? "Enter final 5–40 s only · hold to resolution · TP at 15¢."
+                    ? "Enter final 5–90 s only · hold to resolution · TP at 15¢."
                     : sniperModeLocal === "edge"
                     ? "Enter after 1st minute · TP at 8¢ · re-enter on next edge."
-                    : "Edge snipes mid-window + late snipe in final 40 s."}
+                    : "Edge snipes mid-window + late snipe in final 90 s."}
+                </p>
+              </div>
+
+              {/* ── Smart Exit (LATE mode) ───────────────────────────────── */}
+              <div>
+                <label className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block mb-2">Smart Exit <span className="text-muted-foreground/50 font-normal normal-case">(LATE mode)</span></label>
+                <button
+                  onClick={handleSmartExitToggle}
+                  className={cn(
+                    "w-full flex items-center justify-between px-3 py-2.5 rounded-lg border text-xs font-mono font-bold tracking-wide transition-all duration-200",
+                    smartExitLocal
+                      ? "bg-primary/10 border-primary/40 text-primary"
+                      : "bg-secondary/40 border-border/50 text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <span>{smartExitLocal ? "ENABLED" : "DISABLED"}</span>
+                  <div className={cn(
+                    "w-8 h-4 rounded-full relative transition-colors duration-200",
+                    smartExitLocal ? "bg-primary/40" : "bg-secondary"
+                  )}>
+                    <div className={cn(
+                      "absolute top-0.5 w-3 h-3 rounded-full transition-all duration-200",
+                      smartExitLocal ? "left-4 bg-primary" : "left-0.5 bg-muted-foreground/50"
+                    )} />
+                  </div>
+                </button>
+                <p className="text-[10px] font-mono mt-1.5 text-muted-foreground leading-relaxed">
+                  {smartExitLocal
+                    ? "Exit early if model win prob reverses below 35%."
+                    : "Hold all LATE positions to binary resolution."}
                 </p>
               </div>
 
