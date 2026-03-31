@@ -22,6 +22,18 @@ function authHeaders(): Record<string, string> {
   return {};
 }
 
+/**
+ * Returns a fetch wrapper that automatically adds auth headers and
+ * resolves the path relative to the API base URL.
+ * Usage: const f = useAuthFetch(); await f("/api/backtest?windows=100");
+ */
+export function useAuthFetch() {
+  return useCallback((path: string, init?: RequestInit) => {
+    const url = path.startsWith("http") ? path : `${API_BASE}${path.replace(/^\/api/, "")}`;
+    return fetch(url, { ...init, headers: { ...authHeaders(), ...(init?.headers ?? {}) } });
+  }, []);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Browser-relay hook: polls server for pending LIVE orders, submits them
 // directly from the browser (which is on the user's VPN-connected machine).

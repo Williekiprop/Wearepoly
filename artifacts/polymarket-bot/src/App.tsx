@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/Dashboard";
+import Backtest from "@/pages/Backtest";
 import Login from "@/pages/Login";
 
 function makeQueryClient(onUnauthorized: () => void) {
@@ -59,6 +60,7 @@ function App() {
         >
           <Switch>
             <Route path="/" component={() => <Dashboard onLogout={logout} />} />
+            <Route path="/backtest" component={() => <Backtest onBack={() => window.history.back()} />} />
             <Route component={NotFound} />
           </Switch>
         </WouterRouter>
