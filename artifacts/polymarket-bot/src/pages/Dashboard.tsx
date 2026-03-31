@@ -1264,7 +1264,17 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                       "text-muted-foreground"
                     )}>
                       {trade.status === 'open'
-                        ? <span className="text-warning font-mono text-xs animate-pulse">HOLDING...</span>
+                        ? (() => {
+                            if (trade.mode === 'live') {
+                              // Decode windowEnd from marketId (format: btc5m:{windowEnd}:{conditionId})
+                              const windowEnd = parseInt((trade.marketId ?? '').split(':')[1] ?? '0');
+                              const nowSec = Math.floor(Date.now() / 1000);
+                              if (windowEnd > 0 && nowSec > windowEnd + 30) {
+                                return <span className="text-orange-400 font-mono text-xs animate-pulse">AWAITING...</span>;
+                              }
+                            }
+                            return <span className="text-warning font-mono text-xs animate-pulse">HOLDING...</span>;
+                          })()
                         : formatCurrency(trade.pnl)}
                     </td>
                   </tr>

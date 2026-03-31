@@ -536,10 +536,11 @@ async function runBotCycle(botId: number) {
     }
 
     // ── Step 1: Resolve / manage open positions ──
+    // Always sweep LIVE positions first — handles trades from previous LIVE sessions
+    // even if the bot is currently in TEST mode (e.g. after a mode switch or restart).
+    await resolve5mLivePositions(botId);
     if (state.mode === "test") {
       await resolve5mTestPositions(botId, btcData.currentPrice);
-    } else {
-      await resolve5mLivePositions(botId);
     }
 
     // Re-read state after potential balance updates from closures
@@ -1126,11 +1127,43 @@ async function resolve5mLivePositions(botId: number) {
 
     // Query CLOB to see who won — use direct fetch (market data is not geoblocked)
     try {
+      const secsSinceCloseEarly = nowSec - info.windowEnd;
+
       const clobRes = await fetch(`https://clob.polymarket.com/markets/${info.conditionId}`, {
         signal: AbortSignal.timeout(8000),
       });
       if (!clobRes.ok) {
-        console.warn(`[LIVE 5M] CLOB fetch failed (${clobRes.status}) for ${info.conditionId}`);
+        console.warn(`[LIVE 5M] CLOB fetch failed (${clobRes.status}) for ${info.conditionId} | ${secsSinceCloseEarly}s since close`);
+
+        // If the market is old enough that CLOB has archived it, close the trade
+        // by syncing the actual wallet balance as source of truth.
+        if (secsSinceCloseEarly >= 300) {
+          console.log(`[LIVE 5M] Trade #${pos.id} stale (${Math.floor(secsSinceCloseEarly / 60)}min past close) — closing via wallet balance sync`);
+          const walletBal = await getWalletBalance();
+          const [st2] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+          if (walletBal !== null && st2) {
+            // pnl = wallet_change relative to what we'd have without this trade resolving
+            // db_balance already deducted positionSize, so: pnl = walletBal - st2.balance - pos.positionSize
+            const pnl = walletBal - st2.balance - pos.positionSize;
+            const weWon = pnl > -pos.positionSize * 0.5; // won if we got back more than half
+            console.log(`[LIVE 5M] Wallet-sync close: wallet=$${walletBal.toFixed(2)} db=$${st2.balance.toFixed(2)} posSize=$${pos.positionSize.toFixed(2)} → pnl=${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
+            await db.update(tradesTable).set({
+              status: "closed",
+              exitPrice: weWon ? 1.0 : 0.0,
+              pnl,
+              resolvedAt: new Date(),
+            }).where(eq(tradesTable.id, pos.id));
+            await db.update(botStateTable).set({
+              balance: walletBal,
+              totalTrades: st2.totalTrades + 1,
+              winningTrades: weWon ? st2.winningTrades + 1 : st2.winningTrades,
+              losingTrades: weWon ? st2.losingTrades : st2.losingTrades + 1,
+              totalPnl: st2.totalPnl + pnl,
+              lastUpdated: new Date(),
+            }).where(eq(botStateTable.id, botId));
+            console.log(`[LIVE 5M] Stale trade #${pos.id} closed via wallet sync — ${weWon ? "WON" : "LOST"} | balance: $${walletBal.toFixed(2)}`);
+          }
+        }
         continue;
       }
 
@@ -1154,6 +1187,31 @@ async function resolve5mLivePositions(botId: number) {
 
       if (!upWon && !downWon) {
         console.log(`[LIVE 5M] Market not yet resolved (closed=${clobData.closed}, UP=${(upPrice*100).toFixed(1)}¢, DOWN=${(downPrice*100).toFixed(1)}¢, ${secsSinceClose}s since close) — waiting`);
+
+        // If the oracle hasn't set winner flags after 5 min, fall back to wallet sync
+        // (handles manual redemptions and oracle delays on live markets)
+        if (secsSinceClose >= 300) {
+          console.log(`[LIVE 5M] Trade #${pos.id} oracle timeout (${Math.floor(secsSinceClose / 60)}min) — closing via wallet balance sync`);
+          const walletBal = await getWalletBalance();
+          const [st2] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+          if (walletBal !== null && st2) {
+            const pnl = walletBal - st2.balance - pos.positionSize;
+            const weWon = pnl > -pos.positionSize * 0.5;
+            console.log(`[LIVE 5M] Wallet-sync close: wallet=$${walletBal.toFixed(2)} db=$${st2.balance.toFixed(2)} → pnl=${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}`);
+            await db.update(tradesTable).set({
+              status: "closed", exitPrice: weWon ? 1.0 : 0.0, pnl, resolvedAt: new Date(),
+            }).where(eq(tradesTable.id, pos.id));
+            await db.update(botStateTable).set({
+              balance: walletBal,
+              totalTrades: st2.totalTrades + 1,
+              winningTrades: weWon ? st2.winningTrades + 1 : st2.winningTrades,
+              losingTrades: weWon ? st2.losingTrades : st2.losingTrades + 1,
+              totalPnl: st2.totalPnl + pnl,
+              lastUpdated: new Date(),
+            }).where(eq(botStateTable.id, botId));
+            console.log(`[LIVE 5M] Stale trade #${pos.id} closed (oracle timeout) — ${weWon ? "WON" : "LOST"} | balance: $${walletBal.toFixed(2)}`);
+          }
+        }
         continue;
       }
 
