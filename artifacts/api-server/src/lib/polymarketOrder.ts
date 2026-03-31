@@ -342,8 +342,13 @@ export async function getClobTokenId(
     const data = await res.json() as {
       tokens?: Array<{ token_id: string; outcome: string }>;
     };
+    // BTC 5-min markets use "UP"/"DOWN" outcomes on Polymarket CLOB,
+    // but internally we track them as YES=UP, NO=DOWN.
+    // Search both labels so this works regardless of market naming convention.
+    const wantUp = outcome === "YES";
+    const aliases = wantUp ? ["YES", "UP"] : ["NO", "DOWN"];
     const token = data.tokens?.find(
-      (t) => t.outcome?.toUpperCase() === outcome
+      (t) => aliases.includes(t.outcome?.toUpperCase())
     );
     return token?.token_id ?? null;
   } catch (err) {
