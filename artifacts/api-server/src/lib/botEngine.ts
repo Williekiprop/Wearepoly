@@ -14,7 +14,7 @@
  */
 
 import { db, botStateTable, tradesTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { calcKelly, simulatePriceImpact } from "./lmsr.js";
 import { getBtcPriceData, estimate5mUpProb, startBtcWebSocket } from "./btcPrice.js";
 import { startOrderFlow, getOrderFlowData, updateWindowOpen } from "./orderFlow.js";
@@ -173,7 +173,9 @@ export async function completeBrowserOrder(
       if (state) {
         await db.update(botStateTable).set({
           balance: state.balance - deductedUsdc,
-          totalTrades: state.totalTrades + 1,
+          // NOTE: do NOT increment totalTrades here — the trade is open, not resolved yet.
+          // totalTrades/winningTrades/losingTrades are counted at resolution time only,
+          // so each trade is counted exactly once (when we know the win/loss outcome).
           lastSignal: `LIVE BUY ${direction} — $${deductedUsdc.toFixed(2)} placed`,
           lastUpdated: new Date(),
         }).where(eq(botStateTable.id, botId));
@@ -450,12 +452,42 @@ function startPolling(botId: number) {
 }
 
 /**
- * Called at server startup: if the DB says the bot was running before the
- * server restarted, resume polling without resetting trades/balance.
+ * Recompute totalTrades / winningTrades / losingTrades / totalPnl from the
+ * actual closed trade records. Fixes any double-counting from previous bugs
+ * (e.g. the BUY-confirmation + resolution double-increment).
  */
+async function recalculateTradeStats(botId: number): Promise<void> {
+  try {
+    const [result] = await db.select({
+      totalTrades:   sql<number>`count(*) filter (where status = 'closed')`,
+      winningTrades: sql<number>`count(*) filter (where status = 'closed' and pnl > 0)`,
+      losingTrades:  sql<number>`count(*) filter (where status = 'closed' and pnl <= 0)`,
+      totalPnl:      sql<number>`coalesce(sum(pnl) filter (where status = 'closed'), 0)`,
+    }).from(tradesTable);
+
+    if (!result) return;
+
+    const totalTrades   = Number(result.totalTrades)   || 0;
+    const winningTrades = Number(result.winningTrades)  || 0;
+    const losingTrades  = Number(result.losingTrades)   || 0;
+    const totalPnl      = Number(result.totalPnl)       || 0;
+
+    await db.update(botStateTable).set({
+      totalTrades, winningTrades, losingTrades, totalPnl, lastUpdated: new Date(),
+    }).where(eq(botStateTable.id, botId));
+
+    console.log(`[BOT] Stats recalculated: ${totalTrades} trades (${winningTrades}W / ${losingTrades}L), PnL $${totalPnl.toFixed(4)}`);
+  } catch (err) {
+    console.error("[BOT] Stats recalculation failed:", err);
+  }
+}
+
 export async function autoResumeBot() {
   const state = await ensureBotState();
   if (pollingInterval !== null) return; // already polling
+
+  // Correct any double-counted stats from prior bug before displaying or trading
+  await recalculateTradeStats(state.id);
 
   if (state.running) {
     console.log(`[BOT] Auto-resuming ${state.mode.toUpperCase()} bot (balance $${state.balance?.toFixed(2)}) after restart`);
