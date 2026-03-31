@@ -450,6 +450,47 @@ export async function placeOrder(params: PlaceOrderParams): Promise<OrderResult>
 }
 
 /**
+ * Query the fill status of an order from the CLOB.
+ * Returns { sizeMatched, status } where:
+ *   sizeMatched = number of tokens actually filled (>0 means order was (partially) matched)
+ *   status      = "live" | "matched" | "cancelled" | "delayed" | "unmatched"
+ * Returns null if the query fails (network, auth, etc.)
+ */
+export async function getOrderFillStatus(
+  orderId: string,
+): Promise<{ sizeMatched: number; status: string } | null> {
+  try {
+    const path = `/order/${orderId}`;
+    const headers = await buildApiHeaders("GET", path, "");
+
+    const res = await polyFetch(`${CLOB_API}${path}`, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json() as {
+      status?: string;
+      size_matched?: string;
+      sizeMatched?: string;
+      making_amount?: string;
+      taking_amount?: string;
+    };
+
+    // Polymarket returns sizes as decimal strings (e.g. "12.345")
+    const rawMatched = data.size_matched ?? data.sizeMatched ?? data.taking_amount ?? "0";
+    const sizeMatched = parseFloat(rawMatched) || 0;
+    const status = data.status ?? "unknown";
+
+    return { sizeMatched, status };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Cancel an open order.
  */
 export async function cancelOrder(orderId: string): Promise<boolean> {

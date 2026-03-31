@@ -19,7 +19,7 @@ import { calcKelly, simulatePriceImpact } from "./lmsr.js";
 import { getBtcPriceData, estimate5mUpProb, startBtcWebSocket } from "./btcPrice.js";
 import { startOrderFlow, getOrderFlowData, updateWindowOpen } from "./orderFlow.js";
 import { fetchCurrent5mMarket, getConnectionStatus, type FiveMinMarket } from "./polymarketClient.js";
-import { placeOrder, prepareOrderForBrowser, getClobTokenId, getWalletBalance, redeemWinningPositions, type PreparedBrowserOrder } from "./polymarketOrder.js";
+import { placeOrder, prepareOrderForBrowser, getClobTokenId, getWalletBalance, redeemWinningPositions, getOrderFillStatus, type PreparedBrowserOrder } from "./polymarketOrder.js";
 import { hasProxy, setProxyUrl, markProxyGeoblocked } from "./proxiedFetch.js";
 
 const B_PARAM = 100;
@@ -1162,15 +1162,56 @@ async function resolve5mLivePositions(botId: number) {
         console.log(`[LIVE 5M] Resolving via price fallback (UP=${(upPrice*100).toFixed(1)}¢ DOWN=${(downPrice*100).toFixed(1)}¢, ${secsSinceClose}s since close)`);
       }
 
+      // ── If this order was placed as "live" (pending fill, shares=0 in DB), check actual fill ──
+      if (pos.shares === 0) {
+        const orderId = info.orderId;
+        let actualShares = 0;
+        let wasCancelled = true; // pessimistic default: assume unfilled
+
+        if (orderId) {
+          const fill = await getOrderFillStatus(orderId);
+          console.log(`[LIVE 5M] Order fill check for #${pos.id} (${orderId.substring(0, 10)}...): status=${fill?.status ?? "query_failed"} sizeMatched=${fill?.sizeMatched ?? "?"}`);
+          if (fill !== null) {
+            actualShares = fill.sizeMatched;
+            // "matched" or "delayed" means filled; "live"/"cancelled"/"unmatched" means not filled
+            const filledStatuses = ["matched", "delayed"];
+            wasCancelled = !filledStatuses.includes(fill.status) || actualShares === 0;
+          }
+          // If query failed (null), treat as cancelled — safer than falsely crediting a win
+        } else {
+          // No orderId stored — treat as cancelled (shouldn't happen, but be safe)
+          console.warn(`[LIVE 5M] Trade #${pos.id} has shares=0 and no orderId — marking cancelled`);
+        }
+
+        if (wasCancelled) {
+          console.log(`[LIVE 5M] Trade #${pos.id} was CANCELLED (order unfilled) — refunding $${pos.positionSize.toFixed(2)} to balance`);
+          const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+          if (!st) { resolvingTradeIds.delete(pos.id); continue; }
+          await db.update(tradesTable).set({ status: "cancelled", resolvedAt: new Date() })
+            .where(eq(tradesTable.id, pos.id));
+          await db.update(botStateTable).set({
+            balance: st.balance + pos.positionSize,
+            lastUpdated: new Date(),
+          }).where(eq(botStateTable.id, botId));
+          resolvingTradeIds.delete(pos.id);
+          continue;
+        }
+
+        // Order was actually filled — use real share count from CLOB
+        await db.update(tradesTable).set({ shares: actualShares }).where(eq(tradesTable.id, pos.id));
+        (pos as typeof pos & { shares: number }).shares = actualShares;
+        console.log(`[LIVE 5M] Order fill confirmed: ${actualShares.toFixed(4)} shares — proceeding to resolve`);
+      }
+
       const weBoughtUp = pos.direction === "YES";
       const weWon = weBoughtUp ? upWon : downWon;
 
       const entryPrice = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
       const exitValue = weWon ? 1.0 : 0.0;
 
-      // If shares=0 (order was resting in book when confirmed), estimate from cost/price
-      const effectiveShares = pos.shares > 0 ? pos.shares : pos.positionSize / entryPrice;
-      const effectiveCost = pos.shares > 0 ? pos.positionSize : effectiveShares * entryPrice;
+      // shares is now always > 0 (either DB-stored from original fill, or updated above from CLOB)
+      const effectiveShares = pos.shares;
+      const effectiveCost = pos.positionSize;
       const pnl = effectiveShares * exitValue - effectiveCost; // profit from tokens - cost paid
       const returnedCapital = effectiveCost + pnl; // = effectiveShares * exitValue
 
