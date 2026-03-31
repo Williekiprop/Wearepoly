@@ -55,6 +55,8 @@ function formatState(state: Awaited<ReturnType<typeof getBotState>>) {
     // avoids drift in the accumulated totalPnl column from concurrent writes).
     totalPnl: state.balance - (state.startingBalance ?? state.balance),
     sniperMode: state.sniperMode ?? "late",
+    dailyTradeCount: state.dailyTradeCount ?? 0,
+    maxDailyTrades: 20,
   };
 }
 

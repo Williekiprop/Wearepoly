@@ -82,6 +82,7 @@ function memDb() {
             weeklyStopTriggered: data.weeklyStopTriggered ?? false,
             drawdownPaused: data.drawdownPaused ?? false,
             sniperMode: data.sniperMode ?? "late",
+            dailyTradeCount: data.dailyTradeCount ?? 0,
           };
         } else {
           mem.trades.push({
@@ -225,6 +226,7 @@ export async function runMigrations(): Promise<void> {
       `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS weekly_stop_triggered BOOLEAN   NOT NULL DEFAULT false`,
       `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS drawdown_paused       BOOLEAN   NOT NULL DEFAULT false`,
       `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS sniper_mode           TEXT      NOT NULL DEFAULT 'late'`,
+      `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS daily_trade_count     INTEGER   NOT NULL DEFAULT 0`,
     ];
 
     for (const sql of patches) {

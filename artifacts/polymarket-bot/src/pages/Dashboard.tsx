@@ -314,7 +314,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
         </div>
       )}
 
-      {/* DRAWDOWN PROTECTION BANNER */}
+      {/* RISK MANAGEMENT PANEL — always visible when bot is running */}
       {isRunning && (() => {
         const d = botData as any;
         const paused = d?.drawdownPaused;
@@ -322,28 +322,33 @@ export default function Dashboard({ onLogout }: DashboardProps) {
         const sizingMul = d?.sizingMultiplier ?? 1.0;
         const dailyLoss = (d?.dailyLossPct ?? 0) * 100;
         const weeklyLoss = (d?.weeklyLossPct ?? 0) * 100;
+        const dailyCount = d?.dailyTradeCount ?? 0;
+        const maxDaily = d?.maxDailyTrades ?? 20;
         const LOSS_STREAK_HALF = 5;
         const isHalved = streak >= LOSS_STREAK_HALF && !paused;
+        const isWarning = !paused && (isHalved || streak >= 3 || dailyLoss >= 20 || weeklyLoss >= 30 || dailyCount >= maxDaily * 0.8);
 
-        if (!paused && !isHalved && streak < 3) return null;
+        const borderCls = paused
+          ? "bg-destructive/10 border-destructive/40"
+          : isWarning
+          ? "bg-yellow-500/8 border-yellow-500/30"
+          : "bg-muted/20 border-border/40";
 
         return (
-          <div className={`border rounded-xl px-5 py-4 font-mono text-sm space-y-3 ${
-            paused
-              ? "bg-destructive/10 border-destructive/40"
-              : "bg-yellow-500/8 border-yellow-500/30"
-          }`}>
+          <div className={`border rounded-xl px-5 py-4 font-mono text-sm space-y-3 ${borderCls}`}>
+            {/* Header row */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className={paused ? "text-destructive text-base" : "text-yellow-400 text-base"}>
-                  {paused ? "⛔" : "⚠️"}
+                <span className={paused ? "text-destructive" : isWarning ? "text-yellow-400" : "text-green-400"}>
+                  {paused ? "⛔" : isWarning ? "⚠️" : "✅"}
                 </span>
-                <span className={`font-bold tracking-wide ${paused ? "text-destructive" : "text-yellow-400"}`}>
+                <span className={`font-bold tracking-wide text-xs ${paused ? "text-destructive" : isWarning ? "text-yellow-400" : "text-muted-foreground"}`}>
                   {paused
                     ? d?.weeklyStopTriggered ? "WEEKLY STOP HIT — Trading Paused"
                       : d?.dailyStopTriggered  ? "DAILY STOP HIT — Trading Paused"
                       : `LOSS STREAK STOP (${streak} losses) — Trading Paused`
-                    : `RISK WARNING — ${streak} consecutive losses (sizing ×${sizingMul.toFixed(1)})`}
+                    : isHalved ? `RISK WARNING — ${streak} consecutive losses (sizing ×${sizingMul.toFixed(1)})`
+                    : "RISK CONTROLS ACTIVE"}
                 </span>
               </div>
               {paused && (
@@ -356,14 +361,60 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                 </button>
               )}
             </div>
-            <div className="flex gap-6 text-xs text-muted-foreground">
-              <span>Loss streak: <span className={streak >= 7 ? "text-destructive font-bold" : streak >= 5 ? "text-yellow-400" : "text-foreground"}>{streak}</span></span>
-              <span>Daily loss: <span className={dailyLoss >= 40 ? "text-destructive font-bold" : dailyLoss >= 20 ? "text-yellow-400" : "text-foreground"}>{dailyLoss.toFixed(1)}%</span> of {dailyLoss > 0 ? `$${(d?.dailyStartBalance ?? 0).toFixed(2)}` : "—"}</span>
-              <span>Weekly loss: <span className={weeklyLoss >= 60 ? "text-destructive font-bold" : weeklyLoss >= 30 ? "text-yellow-400" : "text-foreground"}>{weeklyLoss.toFixed(1)}%</span> of {weeklyLoss > 0 ? `$${(d?.weeklyStartBalance ?? 0).toFixed(2)}` : "—"}</span>
-              <span>Sizing: <span className={sizingMul < 1 ? "text-yellow-400 font-bold" : "text-foreground"}>×{sizingMul.toFixed(1)}</span></span>
+
+            {/* Metrics grid */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              {/* Loss streak */}
+              <div className="flex flex-col gap-0.5">
+                <span className="text-muted-foreground uppercase tracking-wide" style={{fontSize:"10px"}}>Loss Streak</span>
+                <span className={`font-bold text-base ${streak >= 7 ? "text-destructive" : streak >= 5 ? "text-yellow-400" : streak >= 3 ? "text-yellow-300" : "text-foreground"}`}>
+                  {streak} <span className="text-xs font-normal text-muted-foreground">/ 7 stop</span>
+                </span>
+                <div className="w-full h-1 rounded-full bg-muted/40 overflow-hidden">
+                  <div className="h-full rounded-full transition-all" style={{width:`${Math.min(streak/7*100,100)}%`, background: streak >= 7 ? "#ef4444" : streak >= 5 ? "#eab308" : "#22c55e"}} />
+                </div>
+              </div>
+
+              {/* Daily trades */}
+              <div className="flex flex-col gap-0.5">
+                <span className="text-muted-foreground uppercase tracking-wide" style={{fontSize:"10px"}}>Trades Today</span>
+                <span className={`font-bold text-base ${dailyCount >= maxDaily ? "text-destructive" : dailyCount >= maxDaily * 0.8 ? "text-yellow-400" : "text-foreground"}`}>
+                  {dailyCount} <span className="text-xs font-normal text-muted-foreground">/ {maxDaily} max</span>
+                </span>
+                <div className="w-full h-1 rounded-full bg-muted/40 overflow-hidden">
+                  <div className="h-full rounded-full transition-all" style={{width:`${Math.min(dailyCount/maxDaily*100,100)}%`, background: dailyCount >= maxDaily ? "#ef4444" : dailyCount >= maxDaily*0.8 ? "#eab308" : "#22c55e"}} />
+                </div>
+              </div>
+
+              {/* Daily drawdown */}
+              <div className="flex flex-col gap-0.5">
+                <span className="text-muted-foreground uppercase tracking-wide" style={{fontSize:"10px"}}>Daily Drawdown</span>
+                <span className={`font-bold text-base ${dailyLoss >= 40 ? "text-destructive" : dailyLoss >= 20 ? "text-yellow-400" : "text-foreground"}`}>
+                  {dailyLoss > 0 ? `-${dailyLoss.toFixed(1)}%` : "—"} <span className="text-xs font-normal text-muted-foreground">/ 40% stop</span>
+                </span>
+                <div className="w-full h-1 rounded-full bg-muted/40 overflow-hidden">
+                  <div className="h-full rounded-full transition-all" style={{width:`${Math.min(dailyLoss/40*100,100)}%`, background: dailyLoss >= 40 ? "#ef4444" : dailyLoss >= 20 ? "#eab308" : "#22c55e"}} />
+                </div>
+              </div>
+
+              {/* Weekly drawdown */}
+              <div className="flex flex-col gap-0.5">
+                <span className="text-muted-foreground uppercase tracking-wide" style={{fontSize:"10px"}}>Weekly Drawdown</span>
+                <span className={`font-bold text-base ${weeklyLoss >= 60 ? "text-destructive" : weeklyLoss >= 30 ? "text-yellow-400" : "text-foreground"}`}>
+                  {weeklyLoss > 0 ? `-${weeklyLoss.toFixed(1)}%` : "—"} <span className="text-xs font-normal text-muted-foreground">/ 60% stop</span>
+                </span>
+                <div className="w-full h-1 rounded-full bg-muted/40 overflow-hidden">
+                  <div className="h-full rounded-full transition-all" style={{width:`${Math.min(weeklyLoss/60*100,100)}%`, background: weeklyLoss >= 60 ? "#ef4444" : weeklyLoss >= 30 ? "#eab308" : "#22c55e"}} />
+                </div>
+              </div>
             </div>
-            {!paused && (
-              <p className="text-xs text-muted-foreground">Position size halved. Trading will pause after {7 - streak} more consecutive loss{7 - streak === 1 ? "" : "es"}.</p>
+
+            {/* Sizing multiplier note */}
+            {sizingMul < 1 && !paused && (
+              <p className="text-xs text-yellow-400/80">Position size at ×{sizingMul.toFixed(1)}. Pause after {7 - streak} more loss{7 - streak === 1 ? "" : "es"}.</p>
+            )}
+            {!paused && !isWarning && (
+              <p className="text-xs text-muted-foreground/60">Entry window ≤90s · Max 25% balance/trade · 5 losses → ½ size · 7 losses → pause</p>
             )}
           </div>
         );

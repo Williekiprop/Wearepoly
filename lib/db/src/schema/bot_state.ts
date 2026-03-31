@@ -29,10 +29,13 @@ export const botStateTable = pgTable("bot_state", {
   weeklyStopTriggered: boolean("weekly_stop_triggered").notNull().default(false),
   drawdownPaused: boolean("drawdown_paused").notNull().default(false),
   // ── Sniper mode ──────────────────────────────────────────────────────────
-  // "late"  = enter only in final 5–40s (original behaviour)
-  // "edge"  = enter when 40–240s remain, exit early on TP or signal flip
-  // "both"  = edge snipes mid-window PLUS late snipe in final 40s
+  // "late"  = enter only in final 5–90s (original behaviour, widened from 40s)
+  // "edge"  = enter when 91–240s remain, exit early on TP or signal flip
+  // "both"  = edge snipes mid-window PLUS late snipe in final 90s
   sniperMode: text("sniper_mode", { enum: ["late", "edge", "both"] }).notNull().default("late"),
+  // ── Daily trade counter ───────────────────────────────────────────────────
+  // Resets to 0 at UTC midnight. Trading pauses when this hits MAX_DAILY_TRADES.
+  dailyTradeCount: integer("daily_trade_count").notNull().default(0),
 });
 
 export const insertBotStateSchema = createInsertSchema(botStateTable).omit({ id: true });

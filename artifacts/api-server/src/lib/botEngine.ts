@@ -176,6 +176,7 @@ export async function completeBrowserOrder(
           // NOTE: do NOT increment totalTrades here — the trade is open, not resolved yet.
           // totalTrades/winningTrades/losingTrades are counted at resolution time only,
           // so each trade is counted exactly once (when we know the win/loss outcome).
+          dailyTradeCount: (state.dailyTradeCount ?? 0) + 1,
           lastSignal: `LIVE BUY ${direction} — $${deductedUsdc.toFixed(2)} placed`,
           lastUpdated: new Date(),
         }).where(eq(botStateTable.id, botId));
@@ -237,10 +238,14 @@ const MAX_EDGE_THRESHOLD_NO  = 0.30;
 const ENTRY_SLIPPAGE      = 0.01;     // 1¢ per entry (half-spread estimate)
 
 // Entry windows per mode
-const LATE_ENTRY_MAX = 40;   // enter only when ≤ 40 s remain
+const LATE_ENTRY_MAX = 90;   // enter only when ≤ 90 s remain (widened from 40s for more signals)
 const LATE_ENTRY_MIN = 5;    // but not in the final 5 s (order may not fill)
 const EDGE_ENTRY_MAX = 240;  // enter up to 4 min from end (≥ 1 min elapsed in 5-min window)
-const EDGE_ENTRY_MIN = 41;   // don't overlap with the late-snipe zone
+const EDGE_ENTRY_MIN = 91;   // don't overlap with the late-snipe zone (was 41, now matches LATE_ENTRY_MAX+1)
+
+// Risk management constants
+const MAX_POSITION_PCT  = 0.25; // hard cap: never risk more than 25% of balance on a single trade
+const MAX_DAILY_TRADES  = 20;   // safety valve: pause new entries if ≥ 20 trades placed today
 
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -274,6 +279,7 @@ async function ensureBotState() {
       dailyStopTriggered: false,
       weeklyStopTriggered: false,
       drawdownPaused: false,
+      dailyTradeCount: 0,
     });
     const [state] = await db.select().from(botStateTable).limit(1);
     _updateStateCache(state);
@@ -682,8 +688,12 @@ async function runBotCycle(botId: number) {
     const baseEdgeCap = isBuyUp ? MAX_EDGE_THRESHOLD_YES : MAX_EDGE_THRESHOLD_NO;
     const effectiveEdgeCap = flow.flowConfirmed ? 0.38 : baseEdgeCap;
     const edgeTooHigh = isEdgeMode && (edge > effectiveEdgeCap);
+
+    // Daily trade limit — safety valve; resets at UTC midnight
+    const dailyLimitHit = (freshState.dailyTradeCount ?? 0) >= MAX_DAILY_TRADES;
+
     const minBalance = freshState.sizingMode === "flat" ? freshState.flatSizeUsdc : 0.5;
-    if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && edge >= directionEdgeThreshold && freshState.balance >= minBalance) {
+    if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && !dailyLimitHit && edge >= directionEdgeThreshold && freshState.balance >= minBalance) {
       signal = isBuyUp ? "BUY_YES" : "BUY_NO";
 
       if (freshState.sizingMode === "flat") {
@@ -695,6 +705,14 @@ async function runBotCycle(botId: number) {
         const kellyScaled = kellyFull * freshState.kellyFraction; // Quarter-Kelly by default
         const rawSize = freshState.balance * kellyScaled * sizingMultiplier;
         positionSize = Math.min(Math.max(rawSize, CLOB_MIN_ORDER), freshState.balance);
+        shares = entryPrice > 0 ? positionSize / entryPrice : 0;
+      }
+
+      // Hard cap: never risk more than MAX_POSITION_PCT of balance on one trade,
+      // regardless of what Kelly recommends (protects against extreme edge estimates).
+      const hardCap = freshState.balance * MAX_POSITION_PCT;
+      if (positionSize > hardCap) {
+        positionSize = hardCap;
         shares = entryPrice > 0 ? positionSize / entryPrice : 0;
       }
     }
@@ -713,6 +731,7 @@ async function runBotCycle(botId: number) {
         : priceTooCertain ? `PRICE_CAP (${certainSide} > ${(maxCertainty*100).toFixed(0)}¢ max)`
         : inNoMansLand ? `NO_MANS_LAND (UP=${(upPrice*100).toFixed(1)}¢ — EDGE dead zone)`
         : edgeTooHigh ? `EDGE_TOO_HIGH (${edgePct}% > ${(effectiveEdgeCap*100).toFixed(0)}% cap${flow.flowConfirmed ? " [flow-confirmed cap]" : ""})`
+        : dailyLimitHit ? `DAILY_LIMIT (${freshState.dailyTradeCount ?? 0}/${MAX_DAILY_TRADES} trades today)`
         : `edge ${edgePct}% < ${isEdgeMode ? (isBuyUp ? "YES" : "NO") + " EDGE" : "LATE"} threshold ${(directionEdgeThreshold*100).toFixed(1)}%`;
       // Throttle: with 3s cycles, log at most once per 15s to reduce noise.
       // Always log if we're in (or near) the entry window.
@@ -961,6 +980,9 @@ async function updateDrawdownProtection(
   const dailyStart  = (isNewDay  ? newBalance : (st.dailyStartBalance  ?? newBalance));
   const weeklyStart = (isNewWeek ? newBalance : (st.weeklyStartBalance ?? newBalance));
 
+  // Reset daily trade count at UTC midnight
+  const dailyTradeCount = isNewDay ? 0 : (st.dailyTradeCount ?? 0);
+
   // Loss streak
   const newStreak = weWon ? 0 : (st.lossStreak ?? 0) + 1;
   if (!weWon) {
@@ -998,6 +1020,7 @@ async function updateDrawdownProtection(
     dailyStopTriggered:  dailyTriggered  || st.dailyStopTriggered,
     weeklyStopTriggered: weeklyTriggered || st.weeklyStopTriggered,
     drawdownPaused: paused,
+    dailyTradeCount,
     lastUpdated: now,
   }).where(eq(botStateTable.id, botId));
 
@@ -1374,7 +1397,7 @@ async function resolve5mLivePositions(botId: number) {
 
 async function openTestPosition(
   botId: number,
-  state: { id: number; balance: number; totalTrades: number; winningTrades: number; losingTrades: number; totalPnl: number },
+  state: { id: number; balance: number; totalTrades: number; winningTrades: number; losingTrades: number; totalPnl: number; dailyTradeCount?: number },
   trade: { direction: "YES" | "NO"; marketPrice: number; edge: number; evPerShare: number; kellyScaledPct: number; positionSize: number; shares: number; priceImpact: number },
   btcPrice: number,
   marketId: string,
@@ -1400,11 +1423,12 @@ async function openTestPosition(
     resolvedAt: null,
   });
 
-  // Reserve capital while position is open
+  // Reserve capital while position is open; increment daily trade count
   await db
     .update(botStateTable)
     .set({
       balance: state.balance - positionSize,
+      dailyTradeCount: (state.dailyTradeCount ?? 0) + 1,
       lastUpdated: new Date(),
     })
     .where(eq(botStateTable.id, botId));
