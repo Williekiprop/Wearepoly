@@ -1,0 +1,25 @@
+Upgrade the Core Model (Calibration + Features)
+Keep your momentum + mean-reversion as one ensemble member, but add:
+Regime detection: Tag every trade (bull/bear/range/high-vol) using ADX, ATR, or vol percentile. Gate trading in bad regimes (e.g., skip low-ADX chop). This alone fixed many self-improving bots.
+Advanced features: Higher-timeframe trend (15M/1H), volume profile, cross-exchange arb signals.
+ML layer: Train a lightweight LSTM/Transformer or XGBoost on historical 5-min resolutions + the features above. Calibrate probabilities so a "70% model prob" actually wins ~70% historically (use Platt scaling or isotonic regression).
+Self-improving loop: After every 50 trades, auto-analyze losers (what regime? what flow missed?). Mutate thresholds or weights only on proven improvements.
+Your execution log (TIME, DIR, ENTRY PROB, EDGE, P&L) is already perfect for this — just pipe it into a simple Python script.
+
+Refine Execution & Risk (Polish What You Have)
+Threshold tuning: Test 20-22% live (your data says it's the cap before "chasing extremes"). Add a dynamic floor based on regime.
+Sniper mode: "BOTH" is smart — but add logic to prioritize late-window snipe only on strong flow confirmation (final 40s).
+Sizing: Quarter-Kelly is conservative and good; consider full Kelly on >22% edge or when flow confirms.
+Slippage guard: Already 0.00% — great for small size. Once scaled, add liquidity checks before entry.
+Arbitrage overlay: Quick check if YES + NO prices sum < $0.99 — instant risk-free edge.
+
+Infrastructure Upgrades for World-Class Speed
+Run on a low-latency VPS near Polymarket/Chainlink nodes (your Proton + ngrok is solid but can be tightened).
+Direct Gamma API or Polymarket SDK for faster order placement than UI.
+Monitor multiple 5-min windows in parallel (your dashboard already supports this).
+
+Validation & Scaling Plan
+Backtest rigorously: Replay your full execution log + historical 5-min markets with the new signals. Target >80% win rate at 19%+ edge with positive expectancy.
+Paper → live: Run the upgraded version in TEST mode for 200+ trades. Only flip to LIVE when win rate stabilizes.
+Risk: Start small ($1-2 flat). Even at 80% win rate, one bad streak hurts — Kelly protects you.
+Metrics to track: Win rate at each edge bucket, P&L per regime, average EV realized vs. predicted.

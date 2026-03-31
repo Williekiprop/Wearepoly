@@ -17,6 +17,7 @@ import { db, botStateTable, tradesTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { calcKelly, simulatePriceImpact } from "./lmsr.js";
 import { getBtcPriceData, estimate5mUpProb, startBtcWebSocket } from "./btcPrice.js";
+import { startOrderFlow, getOrderFlowData, updateWindowOpen } from "./orderFlow.js";
 import { fetchCurrent5mMarket, getConnectionStatus, type FiveMinMarket } from "./polymarketClient.js";
 import { placeOrder, prepareOrderForBrowser, getClobTokenId, getWalletBalance, redeemWinningPositions, type PreparedBrowserOrder } from "./polymarketOrder.js";
 import { hasProxy, setProxyUrl, markProxyGeoblocked } from "./proxiedFetch.js";
@@ -436,6 +437,8 @@ export async function resetBot() {
 
 function startPolling(botId: number) {
   stopPolling();
+  // Start order-flow feeds (idempotent — safe to call multiple times)
+  startOrderFlow();
   // WebSocket feeds BTC price in real-time; cycle can be fast without rate-limit risk.
   // 3-second cycle gives 10+ data points in the critical 10–40s entry window.
   pollingInterval = setInterval(() => runBotCycle(botId), 3_000);
@@ -551,9 +554,14 @@ async function runBotCycle(botId: number) {
       return;
     }
 
-    // ── Step 2: 5m market signal ──
+    // ── Step 2: 5m market signal + order-flow overlay ────────────────────────
+    // Track window transitions so in-window delta knows where BTC opened
+    updateWindowOpen(market5m.windowEnd, btcData.currentPrice);
+    const flow = getOrderFlowData(btcData.currentPrice);
+
     // prob_up = our estimated probability that BTC ends this window HIGHER
-    const probUp = estimate5mUpProb(btcData);
+    // Now enriched with order-book imbalance, liquidation bursts, and in-window delta
+    const probUp = estimate5mUpProb(btcData, flow);
     const upPrice = market5m.upPrice;
     const downPrice = market5m.downPrice;
 
@@ -616,7 +624,12 @@ async function runBotCycle(botId: number) {
     // Apply sizing multiplier from drawdown protection (0.5 after 5 loss streak)
     const sizingMultiplier = freshState.sizingMultiplier ?? 1.0;
 
-    const edgeTooHigh = edge > MAX_EDGE_THRESHOLD; // >22% → paradoxically bad (see constant)
+    // Relax the 22% edge cap when order-flow strongly confirms the direction.
+    // Normal cap blocks "chasing extreme prices when the market is right."
+    // But when OBI > 0.35 OR in-window BTC delta > 0.15%, the extreme price is
+    // Polymarket's latency lag — not the market being smarter. That IS the edge.
+    const effectiveEdgeCap = flow.flowConfirmed ? 0.38 : MAX_EDGE_THRESHOLD;
+    const edgeTooHigh = edge > effectiveEdgeCap;
     const minBalance = freshState.sizingMode === "flat" ? freshState.flatSizeUsdc : 0.5;
     if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && edge >= directionEdgeThreshold && freshState.balance >= minBalance) {
       signal = isBuyUp ? "BUY_YES" : "BUY_NO";
@@ -647,19 +660,21 @@ async function runBotCycle(botId: number) {
         : tooLate  ? `TOO_LATE (${market5m.secondsRemaining}s left, min ${entryMin}s)`
         : priceTooCertain ? `PRICE_CAP (${certainSide} > ${MAX_MARKET_CERTAINTY*100}¢ max)`
         : inNoMansLand ? `NO_MANS_LAND (UP=${(upPrice*100).toFixed(1)}¢ — <30¢/31-45¢/55-69¢ dead zone)`
-        : edgeTooHigh ? `EDGE_TOO_HIGH (${edgePct}% > ${(MAX_EDGE_THRESHOLD*100).toFixed(0)}% cap — extreme price, market momentum too strong)`
+        : edgeTooHigh ? `EDGE_TOO_HIGH (${edgePct}% > ${(effectiveEdgeCap*100).toFixed(0)}% cap${flow.flowConfirmed ? " [flow-confirmed cap]" : ""})`
         : `edge ${edgePct}% < ${isBuyUp ? "YES" : "NO"} threshold ${(directionEdgeThreshold*100).toFixed(1)}%`;
       // Throttle: with 3s cycles, log at most once per 15s to reduce noise.
       // Always log if we're in (or near) the entry window.
       const inOrNearWindow = !tooEarly;
       if (inOrNearWindow || Date.now() - _lastNoTradeLogAt > NO_TRADE_LOG_THROTTLE_MS) {
         _lastNoTradeLogAt = Date.now();
-        console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} | ${reason} | ${secStr}`);
+        const flowTag = `OBI=${flow.obImbalance >= 0 ? "+" : ""}${flow.obImbalance.toFixed(2)} Δwin=${flow.inWindowDelta >= 0 ? "+" : ""}${flow.inWindowDelta.toFixed(3)}%${flow.flowConfirmed ? " ✓FLOW" : ""}`;
+        console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} ${flowTag} | ${reason} | ${secStr}`);
       }
     } else {
       const sizeTag = sizingMultiplier < 1 ? ` [×${sizingMultiplier} drawdown]` : "";
+      const flowTag = flow.flowConfirmed ? ` ✓FLOW(OBI=${flow.obImbalance >= 0 ? "+" : ""}${flow.obImbalance.toFixed(2)},Δ${flow.inWindowDelta >= 0 ? "+" : ""}${flow.inWindowDelta.toFixed(3)}%)` : "";
       const dir = isBuyUp ? "BUY_UP" : "BUY_DOWN";
-      console.log(`[5M] ${dir} | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} edge=+${edgePct}% size=$${positionSize.toFixed(2)}${sizeTag} | ${secStr}`);
+      console.log(`[5M] ${dir} | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} edge=+${edgePct}%${flowTag} size=$${positionSize.toFixed(2)}${sizeTag} | ${secStr}`);
     }
 
     await db

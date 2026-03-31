@@ -273,13 +273,47 @@ export function getBtcWsStatus(): { connected: boolean; price: number } {
 }
 
 /**
- * Estimate true probability that BTC goes UP in the next 5-minute window.
- * Uses multi-timeframe momentum blend.
+ * Estimate true probability that BTC ends this 5-minute window HIGHER.
+ *
+ * Signal model (order-of-precedence):
+ *
+ *  1. In-window BTC delta  (weight 2.0)  — HOW MUCH has BTC already moved this window?
+ *     This is the front-running signal: if BTC is up 0.25% and Polymarket hasn't
+ *     repriced yet, there's pure latency edge available.
+ *
+ *  2. 1-min BTC momentum   (weight 0.40) — recent directional pressure
+ *
+ *  3. Order-book imbalance (weight 0.15) — real-time bid/ask depth ratio from Binance.
+ *     +1 = all bids (buy pressure), −1 = all asks (sell pressure).
+ *
+ *  4. Liquidation bias     (weight 0.08) — 60s rolling forced-order flow.
+ *     Short squeezes (BUY liq) → UP; long stop-outs (SELL liq) → DOWN.
+ *
+ *  5. 5-min momentum       (weight 0.05) — medium-term trend context
+ *
+ *  6. 1-hour trend         (weight 0.02) — macro context
+ *
+ *  7. Funding rate bias    (weight 0.03) — crowded-position squeeze signal
  */
-export function estimate5mUpProb(btcData: BtcPriceData): number {
+export function estimate5mUpProb(
+  btcData: BtcPriceData,
+  flow?: import("./orderFlow.js").OrderFlowData
+): number {
   const { change1m, change5m, change1h } = btcData;
-  const momentum = change1m * 0.60 + change5m * 0.05 + change1h * 0.02;
-  return Math.min(0.95, Math.max(0.05, 0.5 + momentum));
+
+  const baseMomentum =
+    change1m * 0.40 +
+    change5m * 0.05 +
+    change1h * 0.02;
+
+  const flowSignal = flow
+    ? flow.inWindowDelta  * 2.00   // BTC move inside this window — strongest
+    + flow.obImbalance   * 0.15   // live order-book pressure
+    + flow.liquidationBias * 0.08 // forced liquidation direction
+    + flow.fundingBias   * 0.03   // funding rate lean
+    : 0;
+
+  return Math.min(0.95, Math.max(0.05, 0.5 + baseMomentum + flowSignal));
 }
 
 /** @deprecated Use estimate5mUpProb */
