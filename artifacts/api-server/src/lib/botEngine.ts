@@ -469,7 +469,7 @@ export async function autoResumeBot() {
       return;
     }
     const reason = state.totalTrades === 0 ? "fresh state" : `${state.totalTrades} prior trades, resuming after restart`;
-    console.log(`[BOT] Auto-starting TEST bot (balance $${state.balance?.toFixed(2)}) — ${reason}`);
+    console.log(`[BOT] Auto-starting ${state.mode.toUpperCase()} bot (balance $${state.balance?.toFixed(2)}) — ${reason}`);
     await db.update(botStateTable).set({ running: true, lastUpdated: new Date() }).where(eq(botStateTable.id, state.id));
     _updateStateCache({ ...state, running: true, lastUpdated: new Date() });
     startPolling(state.id);
@@ -1627,7 +1627,12 @@ export async function getMarketAnalysis() {
 
   const upPrice = market5m?.upPrice ?? 0.5;
   const downPrice = market5m?.downPrice ?? 0.5;
-  const probUp = estimate5mUpProb(btcData);
+
+  // Include live order-flow signals so the dashboard matches what the bot actually trades on.
+  // Without this, the dashboard could show NO_TRADE while the bot fires a flow-enhanced order.
+  if (market5m) updateWindowOpen(market5m.windowEnd, btcData.currentPrice);
+  const flow = getOrderFlowData(btcData.currentPrice);
+  const probUp = estimate5mUpProb(btcData, flow);
 
   const edgeUp = probUp - upPrice;
   const isBuyUp = edgeUp > 0;
@@ -1679,6 +1684,14 @@ export async function getMarketAnalysis() {
     priceImpact: 0,
     minEdgeThreshold: state.minEdgeThreshold,
     analysisTime: new Date().toISOString(),
+    // Order-flow signals (same data the bot uses when making trade decisions)
+    flowData: {
+      obImbalance:     flow.obImbalance,
+      inWindowDelta:   flow.inWindowDelta,
+      liquidationBias: flow.liquidationBias,
+      fundingBias:     flow.fundingBias,
+      flowConfirmed:   flow.flowConfirmed,
+    },
   };
 }
 

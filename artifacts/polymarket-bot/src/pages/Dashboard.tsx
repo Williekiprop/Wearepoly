@@ -1001,6 +1001,44 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                   <div className="text-[9px] text-muted-foreground">threshold: {formatPct((marketData as any)?.minEdgeThreshold ?? 0.03)}</div>
                 </div>
               </div>
+
+              {/* Order-flow signals row */}
+              {(() => {
+                const fd = (marketData as any)?.flowData;
+                if (!fd) return null;
+                const obi = fd.obImbalance as number;
+                const delta = fd.inWindowDelta as number;
+                const confirmed = fd.flowConfirmed as boolean;
+                const obiColor = Math.abs(obi) > 0.2
+                  ? (obi > 0 ? "text-success" : "text-destructive")
+                  : "text-muted-foreground";
+                const deltaColor = Math.abs(delta) > 0.05
+                  ? (delta > 0 ? "text-success" : "text-destructive")
+                  : "text-muted-foreground";
+                return (
+                  <div className={cn(
+                    "grid grid-cols-2 gap-2 w-full p-2 rounded-lg border",
+                    confirmed ? "border-yellow-500/60 bg-yellow-500/5" : "border-border/30 bg-secondary/10"
+                  )}>
+                    <div className="text-left">
+                      <div className="text-[9px] text-muted-foreground uppercase font-bold mb-0.5">OBI (Order Book)</div>
+                      <div className={cn("text-sm font-mono font-bold", obiColor)}>
+                        {obi >= 0 ? "+" : ""}{obi.toFixed(3)}
+                      </div>
+                      <div className="text-[8px] text-muted-foreground">bid/ask depth balance</div>
+                    </div>
+                    <div className="text-left">
+                      <div className="text-[9px] text-muted-foreground uppercase font-bold mb-0.5">
+                        Δ Window {confirmed && <span className="text-yellow-400">✓FLOW</span>}
+                      </div>
+                      <div className={cn("text-sm font-mono font-bold", deltaColor)}>
+                        {delta >= 0 ? "+" : ""}{(delta * 100).toFixed(3)}%
+                      </div>
+                      <div className="text-[8px] text-muted-foreground">BTC move since window open</div>
+                    </div>
+                  </div>
+                );
+              })()}
             </TerminalCardContent>
           </TerminalCard>
         </div>
