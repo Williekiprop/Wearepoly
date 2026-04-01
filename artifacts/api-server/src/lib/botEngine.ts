@@ -85,6 +85,30 @@ const browserOrderQueue: PendingBrowserOrder[] = [];
 // Key: botId, Value: windowEnd timestamp of the in-flight BUY
 const inFlightBuyWindows = new Map<number, number>();
 
+// ── LATE-mode price drift ring buffer ────────────────────────────────────────
+// Stores the last ~N upPrice samples per window so we can detect whether the
+// market is running against our signal before we enter.  Keyed by windowEnd.
+// Each entry is {ts: epochMs, upPrice: 0-1}.  Older than 30s are pruned each cycle.
+const latePriceHistory = new Map<number, { ts: number; upPrice: number }[]>();
+
+function recordLatePriceSample(windowEnd: number, upPrice: number) {
+  const buf = latePriceHistory.get(windowEnd) ?? [];
+  buf.push({ ts: Date.now(), upPrice });
+  // Keep at most the last 20 samples (~60s at 3s poll rate)
+  if (buf.length > 20) buf.shift();
+  latePriceHistory.set(windowEnd, buf);
+}
+
+/** Returns the upPrice LATE_PRICE_DRIFT_WINDOW_MS ago, or null if no sample that old. */
+function priceBeforeDriftWindow(windowEnd: number): number | null {
+  const buf = latePriceHistory.get(windowEnd);
+  if (!buf || buf.length < 2) return null;
+  const cutoff = Date.now() - LATE_PRICE_DRIFT_WINDOW_MS;
+  // Find the oldest sample that is still within 2× the drift window (don't go too far back)
+  const oldSample = buf.find(s => s.ts <= cutoff);
+  return oldSample?.upPrice ?? null;
+}
+
 // ── In-memory state cache ─────────────────────────────────────────────────────
 // The status endpoint is polled every 3 seconds. Hitting PostgreSQL over the
 // network for every poll adds 50-200ms on Render. Cache the state in memory
@@ -240,9 +264,9 @@ export async function completeBrowserOrder(
 }
 
 // ── Timing constants — LATE sniper mode (original behaviour) ─────────────────
-// Enter only in the final 5–40s; hold to binary resolution; TP at 15¢.
+// Enter only in the final 5–50s; hold to binary resolution; TP at 15¢.
 const TEST_HOLD_MS        = 30_000;   // 30 s min hold before flip/TP in TEST mode
-const LIVE_MIN_HOLD_MS    = 30_000;   // 30 s min hold before flip/TP in LIVE mode
+const LIVE_MIN_HOLD_MS    = 10_000;   // 10 s min hold before TP in LIVE mode (was 30s — too slow near expiry)
 const TAKE_PROFIT_MARKET_GAIN = 0.15; // 15¢ price move = take-profit (late snipe)
 
 // ── Timing constants — EDGE sniper mode (mid-window sniping) ─────────────────
@@ -266,19 +290,29 @@ const MAX_EDGE_THRESHOLD_NO  = 0.30;
 const ENTRY_SLIPPAGE      = 0.01;     // 1¢ per entry (half-spread estimate)
 
 // Entry windows per mode
-const LATE_ENTRY_MAX = 90;   // enter only when ≤ 90 s remain (widened from 40s for more signals)
+const LATE_ENTRY_MAX = 50;   // enter only when ≤ 50 s remain (tightened from 90s — at 60-90s the market already priced in-window momentum)
 const LATE_ENTRY_MIN = 5;    // but not in the final 5 s (order may not fill)
 const EDGE_ENTRY_MAX = 240;  // enter up to 4 min from end (≥ 1 min elapsed in 5-min window)
-const EDGE_ENTRY_MIN = 91;   // don't overlap with the late-snipe zone (was 41, now matches LATE_ENTRY_MAX+1)
+const EDGE_ENTRY_MIN = 51;   // don't overlap with the late-snipe zone (matches LATE_ENTRY_MAX+1)
 
 // Risk management constants
 const MAX_POSITION_PCT  = 0.25; // hard cap: never risk more than 25% of balance on a single trade
 const MAX_DAILY_TRADES  = 100;  // safety valve: pause new entries if ≥ 100 trades placed today
 
+// LATE mode stop-loss: exit if market moves ≥ 10¢ against us.
+// Prevents holding to a full binary loss (100% drawdown) when the market has clearly rejected the signal.
+// At typical 30-50¢ entry prices, 10¢ adverse move caps loss at ~25-35% of position cost.
+const LATE_STOP_LOSS = 0.10;
+
 // Smart exit threshold (LATE mode only)
 // If the model's estimated win probability for our position drops below this level
 // we treat the trade as reversed and exit early rather than hold to binary resolution.
 const LATE_SMART_EXIT_PROB = 0.35;  // exit if model win prob falls below 35%
+
+// Price-drift guard: if the CLOB has moved ≥ this many cents against our intended direction
+// in the last LATE_PRICE_DRIFT_WINDOW_MS milliseconds, skip entry (market knows something we don't).
+const LATE_PRICE_DRIFT_GUARD = 0.04; // 4¢ drift = skip entry
+const LATE_PRICE_DRIFT_WINDOW_MS = 15_000; // look back 15 seconds
 
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -740,7 +774,31 @@ async function runBotCycle(botId: number) {
     const dailyLimitHit = (freshState.dailyTradeCount ?? 0) >= MAX_DAILY_TRADES;
 
     const minBalance = freshState.sizingMode === "flat" ? freshState.flatSizeUsdc : 0.5;
-    if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && !dailyLimitHit && edge >= directionEdgeThreshold && freshState.balance >= minBalance) {
+    // Record CLOB price for drift detection (only while in the late entry window)
+    if (!isEdgeMode && !tooEarly) {
+      recordLatePriceSample(market5m.windowEnd, upPrice);
+    }
+
+    // ── Price-drift guard (LATE mode only) ────────────────────────────────────
+    // If the CLOB has been running ≥ LATE_PRICE_DRIFT_GUARD cents against our
+    // intended direction in the last 15 seconds, the market has momentum we
+    // can't overcome in the remaining window — skip entry.
+    let driftBlocked = false;
+    if (!isEdgeMode && !tooEarly && !tooLate) {
+      const oldUpPrice = priceBeforeDriftWindow(market5m.windowEnd);
+      if (oldUpPrice !== null) {
+        // For BUY_YES we need upPrice to be stable/rising.  Adverse drift = upPrice fell.
+        // For BUY_NO we need downPrice (= 1-upPrice) to be stable/rising.  Adverse drift = upPrice rose.
+        const drift = isBuyUp
+          ? oldUpPrice - upPrice       // positive = upPrice fell = adverse for YES buyer
+          : upPrice - oldUpPrice;      // positive = upPrice rose = adverse for NO buyer
+        if (drift >= LATE_PRICE_DRIFT_GUARD) {
+          driftBlocked = true;
+        }
+      }
+    }
+
+    if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && !dailyLimitHit && !driftBlocked && edge >= directionEdgeThreshold && freshState.balance >= minBalance) {
       signal = isBuyUp ? "BUY_YES" : "BUY_NO";
 
       if (freshState.sizingMode === "flat") {
@@ -783,6 +841,7 @@ async function runBotCycle(botId: number) {
         : inNoMansLand ? `NO_MANS_LAND (UP=${(upPrice*100).toFixed(1)}¢ — EDGE dead zone)`
         : edgeTooHigh ? `EDGE_TOO_HIGH (${edgePct}% > ${(effectiveEdgeCap*100).toFixed(0)}% cap${flow.flowConfirmed ? " [flow-confirmed cap]" : ""})`
         : dailyLimitHit ? `DAILY_LIMIT (${freshState.dailyTradeCount ?? 0}/${MAX_DAILY_TRADES} trades today)`
+        : driftBlocked ? `DRIFT_BLOCKED (market running ${isBuyUp ? "against YES" : "against NO"} entry — ≥${(LATE_PRICE_DRIFT_GUARD*100).toFixed(0)}¢ in ${LATE_PRICE_DRIFT_WINDOW_MS/1000}s)`
         : `edge ${edgePct}% < ${isEdgeMode ? (isBuyUp ? "YES" : "NO") + " EDGE" : "LATE"} threshold ${(directionEdgeThreshold*100).toFixed(1)}%`;
       // Throttle: with 3s cycles, log at most once per 15s to reduce noise.
       // Always log if we're in (or near) the entry window.
@@ -859,14 +918,16 @@ async function runBotCycle(botId: number) {
               return;
             }
 
-            // ── Stop-loss (EDGE / BOTH mode only) ────────────────────────────
-            // LATE mode holds to binary resolution — no stop-loss needed.
-            // EDGE mode enters mid-window where moves can be violent; cut losses
-            // if the market moves ≥ EDGE_STOP_LOSS cents against us.
-            if (isEdgeMode && marketGain <= -EDGE_STOP_LOSS) {
+            // ── Stop-loss ────────────────────────────────────────────────────
+            // LATE mode: 10¢ stop-loss prevents holding to a full binary loss.
+            //   At 30-50¢ entry prices, 10¢ adverse move caps loss at ~25-35% instead of 100%.
+            // EDGE mode: 8¢ stop-loss matches the 8¢ TP → 1:1 risk-reward.
+            const slThreshold = isEdgeMode ? EDGE_STOP_LOSS : LATE_STOP_LOSS;
+            if (marketGain <= -slThreshold) {
               const estPnl = pos.shares * marketGain;
+              const slLabel = isEdgeMode ? "STOP-LOSS" : "STOP-LOSS(LATE)";
               console.log(
-                `[5M ${modeStr}] STOP-LOSS ${dir} | market -${Math.abs(marketGain * 100).toFixed(1)}¢ ` +
+                `[5M ${modeStr}] ${slLabel} ${dir} | market -${Math.abs(marketGain * 100).toFixed(1)}¢ ` +
                 `(${(entryHeldPrice * 100).toFixed(1)}¢ → ${(currentHeldPrice * 100).toFixed(1)}¢) | ` +
                 `est P&L $${estPnl.toFixed(4)}`
               );
