@@ -887,12 +887,42 @@ async function runBotCycle(botId: number) {
         if (inCurrentWindow && !pendingSellTradeIds.has(pos.id)) {
           const heldMs = Date.now() - pos.timestamp.getTime();
 
+          // Pre-compute market gain (used for both immediate SL and time-gated TP/smart-exit)
+          const weBoughtUp = pos.direction === "YES";
+          const currentHeldPrice = weBoughtUp ? upPrice : 1 - upPrice;
+          const entryHeldPrice   = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
+          const marketGain = currentHeldPrice - entryHeldPrice;
+          const dir = weBoughtUp ? "UP" : "DOWN";
+
+          // ── Stop-loss: fires IMMEDIATELY (no hold-time gate) ─────────────
+          // The SL must be able to fire the moment the threshold is hit.
+          // Gating it behind holdMinMs in a 50s window means it can never
+          // fire in time — that was the reason SL wasn't working in LIVE mode.
+          // IMPORTANT: skip if pos.shares=0 (BUY not yet matched by CLOB);
+          //   a 0-share SELL would record $0.00 P&L and not actually exit.
+          const slThreshold = isEdgeMode ? EDGE_STOP_LOSS : LATE_STOP_LOSS;
+          if (marketGain <= -slThreshold) {
+            if (pos.shares > 0) {
+              const estPnl = pos.shares * marketGain;
+              const slLabel = isEdgeMode ? "STOP-LOSS" : "STOP-LOSS(LATE)";
+              console.log(
+                `[5M ${modeStr}] ${slLabel} ${dir} | market -${Math.abs(marketGain * 100).toFixed(1)}¢ ` +
+                `(${(entryHeldPrice * 100).toFixed(1)}¢ → ${(currentHeldPrice * 100).toFixed(1)}¢) | ` +
+                `est P&L $${estPnl.toFixed(4)} | held ${Math.round(heldMs/1000)}s`
+              );
+              if (freshState.mode === "test") {
+                await closeTestPositionEarly(botId, pos, upPrice);
+              } else {
+                const preloadedTid = weBoughtUp ? market5m.upTokenId : market5m.downTokenId;
+                await closeLivePositionEarly(botId, pos, upPrice, market5m.conditionId, "STOP_LOSS", preloadedTid);
+              }
+              return;
+            } else {
+              console.log(`[5M ${modeStr}] SL triggered but shares=0 (BUY unmatched) — holding for binary resolution`);
+            }
+          }
+
           if (heldMs >= holdMinMs) {
-            const weBoughtUp = pos.direction === "YES";
-            const currentHeldPrice = weBoughtUp ? upPrice : 1 - upPrice;
-            const entryHeldPrice   = weBoughtUp ? pos.marketPrice : 1 - pos.marketPrice;
-            const marketGain = currentHeldPrice - entryHeldPrice;
-            const dir = weBoughtUp ? "UP" : "DOWN";
             const gainCents = (marketGain * 100).toFixed(1);
             const tpCents   = (tpTarget * 100).toFixed(0);
             const gainSign  = marketGain >= 0 ? "+" : "";
@@ -911,32 +941,10 @@ async function runBotCycle(botId: number) {
               if (freshState.mode === "test") {
                 await closeTestPositionEarly(botId, pos, upPrice);
               } else {
-                const preloadedTid = pos.direction === "YES" ? market5m.upTokenId : market5m.downTokenId;
+                const preloadedTid = weBoughtUp ? market5m.upTokenId : market5m.downTokenId;
                 await closeLivePositionEarly(botId, pos, upPrice, market5m.conditionId, "TAKE_PROFIT", preloadedTid);
               }
               // Do NOT re-enter immediately — wait for price to pull back.
-              return;
-            }
-
-            // ── Stop-loss ────────────────────────────────────────────────────
-            // LATE mode: 10¢ stop-loss prevents holding to a full binary loss.
-            //   At 30-50¢ entry prices, 10¢ adverse move caps loss at ~25-35% instead of 100%.
-            // EDGE mode: 8¢ stop-loss matches the 8¢ TP → 1:1 risk-reward.
-            const slThreshold = isEdgeMode ? EDGE_STOP_LOSS : LATE_STOP_LOSS;
-            if (marketGain <= -slThreshold) {
-              const estPnl = pos.shares * marketGain;
-              const slLabel = isEdgeMode ? "STOP-LOSS" : "STOP-LOSS(LATE)";
-              console.log(
-                `[5M ${modeStr}] ${slLabel} ${dir} | market -${Math.abs(marketGain * 100).toFixed(1)}¢ ` +
-                `(${(entryHeldPrice * 100).toFixed(1)}¢ → ${(currentHeldPrice * 100).toFixed(1)}¢) | ` +
-                `est P&L $${estPnl.toFixed(4)}`
-              );
-              if (freshState.mode === "test") {
-                await closeTestPositionEarly(botId, pos, upPrice);
-              } else {
-                const preloadedTid = pos.direction === "YES" ? market5m.upTokenId : market5m.downTokenId;
-                await closeLivePositionEarly(botId, pos, upPrice, market5m.conditionId, "STOP_LOSS", preloadedTid);
-              }
               return;
             }
 
@@ -946,7 +954,6 @@ async function runBotCycle(botId: number) {
             // binary resolution is likely to result in a full loss. Exit early at
             // the current Polymarket market price to recover partial value.
             if (!isEdgeMode && (freshState.smartExit ?? true)) {
-              const weBoughtUp = pos.direction === "YES";
               const modelWinProb = weBoughtUp ? probUp : 1 - probUp;
               if (modelWinProb < LATE_SMART_EXIT_PROB) {
                 const estPnl = pos.shares * marketGain;
@@ -957,7 +964,7 @@ async function runBotCycle(botId: number) {
                 if (freshState.mode === "test") {
                   await closeTestPositionEarly(botId, pos, upPrice);
                 } else {
-                  const preloadedTid = pos.direction === "YES" ? market5m.upTokenId : market5m.downTokenId;
+                  const preloadedTid = weBoughtUp ? market5m.upTokenId : market5m.downTokenId;
                   await closeLivePositionEarly(botId, pos, upPrice, market5m.conditionId, "SMART_EXIT", preloadedTid);
                 }
                 return;
@@ -1456,8 +1463,11 @@ async function resolve5mLivePositions(botId: number) {
           if (!st) { resolvingTradeIds.delete(pos.id); continue; }
           await db.update(tradesTable).set({ status: "cancelled", resolvedAt: new Date() })
             .where(eq(tradesTable.id, pos.id));
+          // Refund position size AND undo the dailyTradeCount increment from when the BUY was queued.
+          // Cancelled orders never filled, so they should not count against the daily trade limit.
           await db.update(botStateTable).set({
             balance: st.balance + pos.positionSize,
+            dailyTradeCount: Math.max(0, (st.dailyTradeCount ?? 1) - 1),
             lastUpdated: new Date(),
           }).where(eq(botStateTable.id, botId));
           resolvingTradeIds.delete(pos.id);
@@ -1717,7 +1727,7 @@ async function closeLivePositionEarly(
   pos: typeof tradesTable.$inferSelect,
   currentYesPrice: number,
   conditionId: string | null,
-  reason: "TAKE_PROFIT" | "FLIP",
+  reason: "TAKE_PROFIT" | "STOP_LOSS" | "SMART_EXIT" | "FLIP",
   preloadedTokenId?: string,
 ): Promise<boolean> {
   if (!conditionId) {
@@ -1726,7 +1736,16 @@ async function closeLivePositionEarly(
   }
   if (pendingSellTradeIds.has(pos.id)) return false;
 
+  // Guard: if BUY was never matched (shares=0), we have no tokens to sell.
+  // Attempting a 0-share SELL would write $0.00 P&L and send a bad order.
+  if (pos.shares <= 0) {
+    console.warn(`[LIVE] Skipping early ${reason} for trade #${pos.id} — shares=0 (BUY order not yet matched by CLOB)`);
+    return false;
+  }
+
+  // sellPrice is always the CLOB price for the token we hold (direction-adjusted)
   const sellPrice  = pos.direction === "YES" ? currentYesPrice : 1 - currentYesPrice;
+  // entryPrice similarly direction-adjusted — needed for P&L calculation in completeBrowserOrder
   const entryPrice = pos.direction === "YES" ? pos.marketPrice  : 1 - pos.marketPrice;
 
   const tokenId = preloadedTokenId ?? await getClobTokenId(conditionId, pos.direction);
@@ -1754,7 +1773,11 @@ async function closeLivePositionEarly(
         tokenId,
         entryPrice,
         direction: pos.direction,
-        marketPrice: currentYesPrice,
+        // BUG FIX: pass sellPrice (direction-adjusted) not raw currentYesPrice.
+        // completeBrowserOrder uses marketPrice as exitPrice; for NO positions,
+        // sellPrice = 1-currentYesPrice, NOT currentYesPrice. Using raw YES price
+        // for a NO SELL caused inverted/zero P&L on stop-losses and early exits.
+        marketPrice: sellPrice,
         estimatedProb: currentYesPrice,
         edge: 0,
         kellyScaledPct: 0,
