@@ -171,9 +171,14 @@ export const GetMarketAnalysisResponse = zod.object({
  */
 export const GetBtcPriceResponse = zod.object({
   currentPrice: zod.number(),
+  change1m: zod.number().optional(),
   change5m: zod.number(),
   change1h: zod.number(),
   change24h: zod.number(),
+  change5s: zod.number().optional(),
+  change10s: zod.number().optional(),
+  change15s: zod.number().optional(),
+  change30s: zod.number().optional(),
   candles: zod.array(
     zod.object({
       time: zod.string(),

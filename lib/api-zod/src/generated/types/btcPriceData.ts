@@ -9,9 +9,14 @@ import type { BtcCandle } from "./btcCandle";
 
 export interface BtcPriceData {
   currentPrice: number;
+  change1m?: number;
   change5m: number;
   change1h: number;
   change24h: number;
+  change5s?: number;
+  change10s?: number;
+  change15s?: number;
+  change30s?: number;
   candles: BtcCandle[];
   fetchedAt: string;
 }

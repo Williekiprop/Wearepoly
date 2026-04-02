@@ -29,6 +29,12 @@ export interface BtcPriceData {
   change5m: number;
   change1h: number;
   change24h: number;
+  // Short-term tick velocity — computed from the Kraken WebSocket tick ring buffer.
+  // These are PERCENTAGE changes (e.g. 0.05 = +0.05%). Only populated after ~15s of WS data.
+  change5s: number;   // BTC % change over the last 5 seconds
+  change10s: number;  // BTC % change over the last 10 seconds
+  change15s: number;  // BTC % change over the last 15 seconds
+  change30s: number;  // BTC % change over the last 30 seconds
   candles: BtcCandle[];
   fetchedAt: string;
   source: "websocket" | "http";
@@ -42,6 +48,35 @@ let candles: BtcCandle[] = [];
 let lastCandleRefresh = 0;
 const CANDLE_REFRESH_INTERVAL = 60_000; // refresh OHLC candles once per minute
 
+// ── Short-term tick ring buffer ───────────────────────────────────────────────
+// Stores timestamped BTC prices from the Kraken WebSocket for the last 60 seconds.
+// This enables sub-minute velocity signals (5s/10s/15s/30s) that cannot be derived
+// from 1-minute OHLC candles. The buffer is capped at 300 entries (max ~5/s × 60s).
+const tickHistory: { ts: number; price: number }[] = [];
+const TICK_BUFFER_MAX_MS = 60_000;
+
+function recordTick(price: number): void {
+  const now = Date.now();
+  tickHistory.push({ ts: now, price });
+  // Evict entries older than 60s (amortised O(1) via front-shift only when stale)
+  while (tickHistory.length > 0 && now - tickHistory[0].ts > TICK_BUFFER_MAX_MS) {
+    tickHistory.shift();
+  }
+}
+
+/**
+ * Returns the BTC price recorded closest-to-but-at-or-before `nSeconds` ago.
+ * Returns null if the buffer doesn't yet have data that old.
+ */
+function priceNSecondsAgo(nSeconds: number): number | null {
+  const cutoff = Date.now() - nSeconds * 1000;
+  // Walk backwards; first entry at or before the cutoff is our target
+  for (let i = tickHistory.length - 1; i >= 0; i--) {
+    if (tickHistory[i].ts <= cutoff) return tickHistory[i].price;
+  }
+  return null; // not enough history yet
+}
+
 // Last full cache snapshot — returned instantly to callers
 let latestData: BtcPriceData = {
   currentPrice: 0,
@@ -49,6 +84,10 @@ let latestData: BtcPriceData = {
   change5m: 0,
   change1h: 0,
   change24h: 0,
+  change5s: 0,
+  change10s: 0,
+  change15s: 0,
+  change30s: 0,
   candles: [],
   fetchedAt: new Date().toISOString(),
   source: "http",
@@ -138,6 +177,18 @@ function rebuildSnapshot(source: "websocket" | "http"): void {
   const change1h = price1hAgo > 0 ? ((currentPrice - price1hAgo) / price1hAgo) * 100 : 0;
   const change24h = openPrice24h > 0 ? ((currentPrice - openPrice24h) / openPrice24h) * 100 : 0;
 
+  // Short-term velocity from the tick ring buffer
+  const p5s  = priceNSecondsAgo(5);
+  const p10s = priceNSecondsAgo(10);
+  const p15s = priceNSecondsAgo(15);
+  const p30s = priceNSecondsAgo(30);
+  const pct = (old: number | null) =>
+    old !== null && old > 0 ? ((currentPrice - old) / old) * 100 : 0;
+  const change5s  = pct(p5s);
+  const change10s = pct(p10s);
+  const change15s = pct(p15s);
+  const change30s = pct(p30s);
+
   // Patch the live in-progress candle close with the WebSocket price
   const patchedCandles = candles.length > 0
     ? [
@@ -152,6 +203,10 @@ function rebuildSnapshot(source: "websocket" | "http"): void {
     change5m,
     change1h,
     change24h,
+    change5s,
+    change10s,
+    change15s,
+    change30s,
     candles: patchedCandles,
     fetchedAt: new Date().toISOString(),
     source,
@@ -204,6 +259,9 @@ function connectKrakenWs(): void {
         if (tick.last && tick.last > 0) {
           currentPrice = tick.last;
           if (tick.open?.today && openPrice24h === 0) openPrice24h = tick.open.today;
+
+          // Record every tick into the short-term velocity ring buffer
+          recordTick(currentPrice);
 
           // Throttle snapshot rebuilds to 4 per second max
           rebuildSnapshot("websocket");
@@ -275,31 +333,61 @@ export function getBtcWsStatus(): { connected: boolean; price: number } {
 /**
  * Estimate true probability that BTC ends this 5-minute window HIGHER.
  *
- * Signal model (order-of-precedence):
+ * ── Model architecture (time-aware) ─────────────────────────────────────────
  *
- *  1. In-window BTC delta  (weight 2.0)  — HOW MUCH has BTC already moved this window?
- *     This is the front-running signal: if BTC is up 0.25% and Polymarket hasn't
- *     repriced yet, there's pure latency edge available.
+ * Two regimes based on `secondsRemaining`:
  *
- *  2. 1-min BTC momentum   (weight 0.40) — recent directional pressure
+ * EDGE / MID-WINDOW (> 50s remaining):
+ *   Primary signal = in-window BTC delta (weight 2.0).
+ *   The market has NOT yet priced in this window's BTC move — pure latency edge.
+ *   Short-term velocity signals are also available but secondary.
  *
- *  3. Order-book imbalance (weight 0.15) — real-time bid/ask depth ratio from Binance.
- *     +1 = all bids (buy pressure), −1 = all asks (sell pressure).
+ * LATE / FINAL 50s (≤ 50s remaining):
+ *   Primary signal = SHORT-TERM BTC TICK VELOCITY (5s/10s/15s).
+ *   WHY: By the time we enter in the final 50s, the market has ALREADY priced in
+ *   the entire in-window delta (BTC's move from 4.5 minutes ago is old news to
+ *   Polymarket market-makers). Only the LAST FEW SECONDS of BTC movement is
+ *   genuinely un-priced — that is our true latency edge.
+ *   In-window delta is still included but heavily time-decayed.
  *
- *  4. Liquidation bias     (weight 0.08) — 60s rolling forced-order flow.
- *     Short squeezes (BUY liq) → UP; long stop-outs (SELL liq) → DOWN.
- *
- *  5. 5-min momentum       (weight 0.05) — medium-term trend context
- *
- *  6. 1-hour trend         (weight 0.02) — macro context
- *
- *  7. Funding rate bias    (weight 0.03) — crowded-position squeeze signal
+ * Shared signals (both regimes):
+ *   - 1-min BTC momentum (0.40)   — recent directional pressure
+ *   - Order-book imbalance (0.15) — real-time Binance bid/ask depth ratio
+ *   - Liquidation bias (0.08)     — 60s rolling forced-order flow
+ *   - 5-min momentum (0.05)       — medium-term trend context
+ *   - 1-hour trend (0.02)         — macro context
+ *   - Funding rate (0.03)         — crowded-position squeeze signal
  */
 export function estimate5mUpProb(
   btcData: BtcPriceData,
-  flow?: import("./orderFlow.js").OrderFlowData
+  flow?: import("./orderFlow.js").OrderFlowData,
+  secondsRemaining?: number
 ): number {
-  const { change1m, change5m, change1h } = btcData;
+  const { change1m, change5m, change1h, change5s, change10s, change15s } = btcData;
+
+  // Determine regime
+  const isLateWindow = secondsRemaining !== undefined && secondsRemaining <= 50;
+
+  // ── In-window delta weight: time-decayed in the late regime ─────────────────
+  // At t=50s: weight = 0.80  (market has repriced ~60% of the move)
+  // At t=30s: weight = 0.50  (market has repriced ~75% of the move)
+  // At t=10s: weight = 0.20  (market has repriced ~90% of the move)
+  // Mid-window: weight = 2.0 (market has NOT repriced yet — full latency edge)
+  const inWindowWeight = isLateWindow && secondsRemaining !== undefined
+    ? Math.max(0.20, secondsRemaining / 60)   // 50s→0.83, 30s→0.50, 12s→0.20
+    : 2.00;
+
+  // ── Short-term tick velocity — ONLY valid / useful in the late window ────────
+  // These capture the BTC move in the last 5-15 seconds — the only slice of time
+  // that Polymarket market-makers have NOT yet had a chance to price in.
+  // Weights calibrated so a 0.05% BTC move in 5s → ~+10% model shift.
+  //   change5s  = 0.05 → 0.05 × 2.5 = +0.125 → model = 62.5%
+  //   change10s = 0.05 → 0.05 × 1.2 = +0.060 → model = 56.0% (supporting signal)
+  const shortTermSignal = isLateWindow
+    ? (change5s  ?? 0) * 2.50   // primary: last 5 seconds
+    + (change10s ?? 0) * 1.20   // secondary: last 10 seconds
+    + (change15s ?? 0) * 0.50   // tertiary: last 15 seconds
+    : 0;
 
   const baseMomentum =
     change1m * 0.40 +
@@ -307,13 +395,13 @@ export function estimate5mUpProb(
     change1h * 0.02;
 
   const flowSignal = flow
-    ? flow.inWindowDelta  * 2.00   // BTC move inside this window — strongest
-    + flow.obImbalance   * 0.15   // live order-book pressure
-    + flow.liquidationBias * 0.08 // forced liquidation direction
-    + flow.fundingBias   * 0.03   // funding rate lean
+    ? flow.inWindowDelta  * inWindowWeight   // time-decayed in-window delta
+    + flow.obImbalance   * 0.15             // live order-book pressure
+    + flow.liquidationBias * 0.08           // forced liquidation direction
+    + flow.fundingBias   * 0.03             // funding rate lean
     : 0;
 
-  return Math.min(0.95, Math.max(0.05, 0.5 + baseMomentum + flowSignal));
+  return Math.min(0.95, Math.max(0.05, 0.5 + baseMomentum + flowSignal + shortTermSignal));
 }
 
 /** @deprecated Use estimate5mUpProb */

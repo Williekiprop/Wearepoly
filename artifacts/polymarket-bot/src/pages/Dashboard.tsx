@@ -493,6 +493,15 @@ export default function Dashboard({ onLogout }: DashboardProps) {
             <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">BTC/USD (Global)</span>
             <div className="flex items-baseline gap-2">
               <span className="text-lg font-mono font-bold">{formatCurrency(btcData?.currentPrice)}</span>
+              <span className={cn("text-[11px] font-mono font-bold px-1.5 py-0.5 rounded",
+                ((btcData as any)?.change5s ?? 0) > 0.005
+                  ? "bg-success/20 text-success"
+                  : ((btcData as any)?.change5s ?? 0) < -0.005
+                    ? "bg-destructive/20 text-destructive"
+                    : "text-muted-foreground"
+              )}>
+                {((btcData as any)?.change5s ?? 0) >= 0 ? "+" : ""}{((btcData as any)?.change5s ?? 0).toFixed(3)}% (5s)
+              </span>
               <span className={cn("text-xs font-mono font-medium", 
                 ((btcData as any)?.change1m || 0) >= 0 ? "text-success" : "text-destructive"
               )}>

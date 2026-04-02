@@ -695,9 +695,10 @@ async function runBotCycle(botId: number) {
     updateWindowOpen(market5m.windowEnd, btcData.currentPrice);
     const flow = getOrderFlowData(btcData.currentPrice);
 
-    // prob_up = our estimated probability that BTC ends this window HIGHER
-    // Now enriched with order-book imbalance, liquidation bursts, and in-window delta
-    const probUp = estimate5mUpProb(btcData, flow);
+    // prob_up = our estimated probability that BTC ends this window HIGHER.
+    // Pass secondsRemaining so the model can apply time-aware weighting:
+    // in the final 50s, short-term tick velocity dominates over in-window delta.
+    const probUp = estimate5mUpProb(btcData, flow, market5m.secondsRemaining);
     const upPrice = market5m.upPrice;
     const downPrice = market5m.downPrice;
 
@@ -814,7 +815,28 @@ async function runBotCycle(botId: number) {
       }
     }
 
-    if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && !dailyLimitHit && !driftBlocked && edge >= directionEdgeThreshold && freshState.balance >= minBalance) {
+    // ── Minimum model confidence gate (LATE mode only) ────────────────────────
+    // Require the model to be at least 57% confident in OUR DIRECTION before entering.
+    // This prevents entries where the edge comes from a very weak 50-53% model signal
+    // betting against a market at 42-45¢ — barely-above-random predictions with full
+    // binary loss exposure. At 57% we have meaningful directional conviction.
+    // EDGE mode: not applied — EDGE mode has higher explicit edge thresholds.
+    const MIN_LATE_MODEL_CONFIDENCE = 0.57;
+    const lowModelConfidence = !isEdgeMode && winProb < MIN_LATE_MODEL_CONFIDENCE;
+
+    // ── BTC velocity direction confirmation (LATE mode only) ──────────────────
+    // The 5-second BTC tick velocity is the primary front-running signal in LATE mode.
+    // If the very-short-term BTC movement CONFLICTS with our model direction (e.g., model
+    // says UP but BTC fell in the last 5s), the market is likely already repricing against
+    // us — skip entry. This prevents chasing moves that have already reversed.
+    // A near-zero velocity (< 0.005%) is treated as neutral (no conflict block).
+    const BTC_VELOCITY_CONFLICT_MIN = 0.005; // 0.005% = ~$4 BTC move — must be meaningful to block
+    const btcVelocity5s = btcData.change5s ?? 0;
+    const velocityConflict = !isEdgeMode && !tooEarly && !tooLate &&
+      Math.abs(btcVelocity5s) >= BTC_VELOCITY_CONFLICT_MIN &&
+      (isBuyUp ? btcVelocity5s < 0 : btcVelocity5s > 0);  // velocity opposes our signal
+
+    if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && !dailyLimitHit && !driftBlocked && !lowModelConfidence && !velocityConflict && edge >= directionEdgeThreshold && freshState.balance >= minBalance) {
       signal = isBuyUp ? "BUY_YES" : "BUY_NO";
 
       if (freshState.sizingMode === "flat") {
@@ -845,6 +867,7 @@ async function runBotCycle(botId: number) {
     const edgePct  = (edge * 100).toFixed(2);
     const secStr   = market5m.secondsRemaining > 0 ? `${market5m.secondsRemaining}s left` : "RESOLVED";
     const chg1m    = btcData.change1m >= 0 ? `+${btcData.change1m.toFixed(3)}%` : `${btcData.change1m.toFixed(3)}%`;
+    const chg5s    = (btcData.change5s ?? 0) >= 0 ? `+${(btcData.change5s ?? 0).toFixed(3)}%` : `${(btcData.change5s ?? 0).toFixed(3)}%`;
     if (signal === "NO_TRADE") {
       const certainSide = upPrice > downPrice ? `UP=${(upPrice*100).toFixed(1)}¢` : `DOWN=${(downPrice*100).toFixed(1)}¢`;
       const reason = tooEarly ? `TOO_EARLY (${market5m.secondsRemaining}s left, wait for ≤${entryMax}s)`
@@ -858,20 +881,22 @@ async function runBotCycle(botId: number) {
         : edgeTooHigh ? `EDGE_TOO_HIGH (${edgePct}% > ${(effectiveEdgeCap*100).toFixed(0)}% cap${flow.flowConfirmed ? " [flow-confirmed cap]" : ""})`
         : dailyLimitHit ? `DAILY_LIMIT (${freshState.dailyTradeCount ?? 0}/${MAX_DAILY_TRADES} trades today)`
         : driftBlocked ? `DRIFT_BLOCKED (market running ${isBuyUp ? "against YES" : "against NO"} entry — ≥${(LATE_PRICE_DRIFT_GUARD*100).toFixed(0)}¢ in ${LATE_PRICE_DRIFT_WINDOW_MS/1000}s)`
+        : lowModelConfidence ? `LOW_CONFIDENCE (model=${(winProb*100).toFixed(1)}% < ${(MIN_LATE_MODEL_CONFIDENCE*100).toFixed(0)}% min — weak signal, skip)`
+        : velocityConflict ? `VELOCITY_CONFLICT (BTC 5s=${chg5s} opposes ${isBuyUp ? "UP" : "DOWN"} signal — market already repricing)`
         : `edge ${edgePct}% < ${isEdgeMode ? (isBuyUp ? "YES" : "NO") + " EDGE" : "LATE"} threshold ${(directionEdgeThreshold*100).toFixed(1)}%`;
       // Throttle: with 3s cycles, log at most once per 15s to reduce noise.
       // Always log if we're in (or near) the entry window.
       const inOrNearWindow = !tooEarly;
       if (inOrNearWindow || Date.now() - _lastNoTradeLogAt > NO_TRADE_LOG_THROTTLE_MS) {
         _lastNoTradeLogAt = Date.now();
-        const flowTag = `OBI=${flow.obImbalance >= 0 ? "+" : ""}${flow.obImbalance.toFixed(2)} Δwin=${flow.inWindowDelta >= 0 ? "+" : ""}${flow.inWindowDelta.toFixed(3)}%${flow.flowConfirmed ? " ✓FLOW" : ""}`;
+        const flowTag = `OBI=${flow.obImbalance >= 0 ? "+" : ""}${flow.obImbalance.toFixed(2)} Δwin=${flow.inWindowDelta >= 0 ? "+" : ""}${flow.inWindowDelta.toFixed(3)}% 5s=${chg5s}${flow.flowConfirmed ? " ✓FLOW" : ""}`;
         console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} ${flowTag} | ${reason} | ${secStr}`);
       }
     } else {
       const sizeTag = sizingMultiplier < 1 ? ` [×${sizingMultiplier} drawdown]` : "";
       const flowTag = flow.flowConfirmed ? ` ✓FLOW(OBI=${flow.obImbalance >= 0 ? "+" : ""}${flow.obImbalance.toFixed(2)},Δ${flow.inWindowDelta >= 0 ? "+" : ""}${flow.inWindowDelta.toFixed(3)}%)` : "";
       const dir = isBuyUp ? "BUY_UP" : "BUY_DOWN";
-      console.log(`[5M] ${dir} | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} edge=+${edgePct}%${flowTag} size=$${positionSize.toFixed(2)}${sizeTag} | ${secStr}`);
+      console.log(`[5M] ${dir} | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} 5s=${chg5s} edge=+${edgePct}%${flowTag} size=$${positionSize.toFixed(2)}${sizeTag} | ${secStr}`);
     }
 
     await db
@@ -2052,7 +2077,7 @@ export async function getMarketAnalysis() {
   // Without this, the dashboard could show NO_TRADE while the bot fires a flow-enhanced order.
   if (market5m) updateWindowOpen(market5m.windowEnd, btcData.currentPrice);
   const flow = getOrderFlowData(btcData.currentPrice);
-  const probUp = estimate5mUpProb(btcData, flow);
+  const probUp = estimate5mUpProb(btcData, flow, market5m?.secondsRemaining);
 
   const edgeUp = probUp - upPrice;
   const isBuyUp = edgeUp > 0;

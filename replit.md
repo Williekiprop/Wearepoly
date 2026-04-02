@@ -58,17 +58,25 @@ artifacts-monorepo/
 - `artifacts/api-server/src/routes/market.ts` — market analysis, BTC price, connection status
 - `artifacts/polymarket-bot/src/pages/Dashboard.tsx` — main trading UI
 
-### Signal Model
-- `probUp = 0.5 + change1m×0.60 + change5m×0.05 + change1h×0.02`
-- Default `minEdgeThreshold = 0.04` (4%) — bot only trades when model edge ≥ 4%
+### Signal Model (Time-Aware, v2)
+Two regimes depending on `secondsRemaining`:
+
+**EDGE / Mid-window (> 50s):** `probUp = 0.5 + inWindowDelta×2.0 + change1m×0.40 + OBI×0.15 + liq×0.08 + change5m×0.05 + change1h×0.02 + funding×0.03`
+
+**LATE / Final 50s:** Same but `inWindowDelta` is time-decayed (`weight = max(0.20, secondsRemaining/60)`) and SHORT-TERM TICK VELOCITY is added as the primary front-running signal: `change5s×2.5 + change10s×1.2 + change15s×0.5`. The WS ring-buffer (60s of ticks, sampled every Kraken tick) provides `change5s/10s/15s/30s` in real-time.
+
+**Why:** At t=50s Polymarket has ALREADY priced in the whole-window BTC move (4+ minutes of data). Only the last 5-15 seconds of BTC movement is genuinely un-priced — that is the true latency edge.
+
+- Default `minEdgeThreshold = 0.08` (8%) for LATE mode
 - Quarter-Kelly sizing (kellyFraction=0.25) enforced by default
 - Sizing mode: `kelly` (default) or `flat`
 
 ### Entry Strategy: Late-Cycle Sniping
-- Bot ONLY enters in the final **10–40 seconds** of each 5-minute window
-- `tooEarly = secondsRemaining > 40` — waits for late-window price lock-in
+- Bot ONLY enters in the final **5–50 seconds** of each 5-minute window
+- `tooEarly = secondsRemaining > 50` — waits for late-window repricing
 - `tooLate = secondsRemaining < 5` — avoids fills missing resolution
-- Rational: late window prices reflect near-certain momentum; variance collapses
+- **Minimum model confidence gate**: model must be ≥57% confident in our direction
+- **BTC velocity confirmation**: 5s BTC tick must NOT oppose signal direction (prevents chasing reversals)
 
 ### Risk Controls
 - **Drawdown protection**: daily stop at -40%, weekly stop at -60% of period starting balance
