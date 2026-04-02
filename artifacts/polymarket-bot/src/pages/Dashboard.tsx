@@ -1339,6 +1339,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                 <th className="px-4 py-3 font-semibold text-right">Size</th>
                 <th className="px-4 py-3 font-semibold text-right">Impact</th>
                 <th className="px-4 py-3 font-semibold text-right">P&L</th>
+                <th className="px-4 py-3 font-semibold text-center">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -1389,11 +1390,29 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                           })()
                         : formatCurrency(trade.pnl)}
                     </td>
+                    <td className="px-4 py-3 text-center">
+                      {trade.status === 'open' ? (
+                        <button
+                          onClick={() => {
+                            if (confirm(`Cancel trade #${trade.id} (${trade.direction} $${trade.positionSize.toFixed(2)})? Balance will be refunded.`)) {
+                              mutations.cancelPosition.mutate(trade.id);
+                            }
+                          }}
+                          disabled={mutations.cancelPosition.isPending}
+                          className="text-[10px] font-mono px-2 py-1 rounded border border-destructive/50 text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          title="Force-cancel this position and refund balance"
+                        >
+                          {mutations.cancelPosition.isPending ? '...' : 'CANCEL'}
+                        </button>
+                      ) : (
+                        <span className="text-muted-foreground text-[10px]">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground font-mono text-sm border-b border-border/30 bg-secondary/5">
+                  <td colSpan={9} className="px-4 py-12 text-center text-muted-foreground font-mono text-sm border-b border-border/30 bg-secondary/5">
                     NO EXECUTIONS LOGGED
                   </td>
                 </tr>

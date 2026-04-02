@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { getBotState, startBot, stopBot, resetBot, setSizingMode, setMinEdgeThreshold, setSniperMode, setSmartExit, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance, resetDrawdownStops } from "../lib/botEngine.js";
+import { getBotState, startBot, stopBot, resetBot, setSizingMode, setMinEdgeThreshold, setSniperMode, setSmartExit, dequeueBrowserOrder, completeBrowserOrder, syncWalletBalance, resetDrawdownStops, cancelLivePosition } from "../lib/botEngine.js";
 import { hasProxy, setProxyUrl, getProxyDisplay, getGeoblockCooldownMs, resetGeoblockCooldown, testProxy, polyFetch } from "../lib/proxiedFetch.js";
 import { getBtcWsStatus } from "../lib/btcPrice.js";
 import { ethers } from "ethers";
@@ -170,6 +170,15 @@ router.post("/bot/reset-stops", async (_req, res): Promise<void> => {
   await resetDrawdownStops(state.id);
   const updated = await getBotState();
   res.json(formatState(updated));
+});
+
+router.post("/bot/cancel-position/:tradeId", async (req, res): Promise<void> => {
+  const tradeId = parseInt(req.params.tradeId, 10);
+  if (isNaN(tradeId)) { res.status(400).json({ error: "Invalid tradeId" }); return; }
+  const result = await cancelLivePosition(tradeId);
+  if (!result.ok) { res.status(400).json({ error: result.message }); return; }
+  const state = await getBotState();
+  res.json({ ...formatState(state), message: result.message });
 });
 
 router.get("/bot/api-test", async (_req, res): Promise<void> => {

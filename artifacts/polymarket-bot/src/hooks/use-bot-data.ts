@@ -301,6 +301,22 @@ export function useBotPolling() {
     },
   });
 
+  const cancelPositionMutation = useMutation({
+    mutationFn: async (tradeId: number) => {
+      const res = await fetch(`${API_BASE}/bot/cancel-position/${tradeId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Cancel failed");
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: getGetBotStatusQueryKey() });
+      queryClient.invalidateQueries({ queryKey: getGetTradesQueryKey() });
+    },
+  });
+
   return {
     status: statusQuery,
     analysis: analysisQuery,
@@ -314,6 +330,7 @@ export function useBotPolling() {
       proxy: proxyMutation,
       proxyTest: proxyTestMutation,
       resetStops: resetStopsMutation,
+      cancelPosition: cancelPositionMutation,
     }
   };
 }

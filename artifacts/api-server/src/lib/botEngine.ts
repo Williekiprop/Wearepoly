@@ -529,8 +529,9 @@ function startPolling(botId: number) {
   // Start order-flow feeds (idempotent — safe to call multiple times)
   startOrderFlow();
   // WebSocket feeds BTC price in real-time; cycle can be fast without rate-limit risk.
-  // 3-second cycle gives 10+ data points in the critical 10–40s entry window.
-  pollingInterval = setInterval(() => runBotCycle(botId), 3_000);
+  // 1.5-second cycle gives 20+ data points in the critical 10–40s entry window,
+  // and halves the stop-loss detection lag when prices gap through the threshold.
+  pollingInterval = setInterval(() => runBotCycle(botId), 1_500);
   runBotCycle(botId);
 }
 
@@ -659,8 +660,23 @@ async function runBotCycle(botId: number) {
     }
 
     // Re-read state after potential balance updates from closures
-    const [freshState] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
+    let [freshState] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
     if (!freshState?.running) return;
+
+    // ── Proactive daily trade count reset at UTC midnight ─────────────────────
+    // updateDrawdownProtection only resets the count after a trade closes; if no
+    // trade closes by midnight the count carries over forever. Check here every
+    // cycle so the reset happens within 1-2 seconds of midnight regardless.
+    {
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const lastDay  = freshState.lastUpdated?.toISOString().slice(0, 10);
+      if (lastDay && lastDay < todayStr && (freshState.dailyTradeCount ?? 0) > 0) {
+        console.log(`[BOT] New UTC day (${todayStr}) — resetting daily trade count from ${freshState.dailyTradeCount} to 0`);
+        await db.update(botStateTable).set({ dailyTradeCount: 0, lastUpdated: new Date() })
+          .where(eq(botStateTable.id, botId));
+        freshState = { ...freshState, dailyTradeCount: 0 };
+      }
+    }
 
     // ── Drawdown check: abort the full cycle if trading is paused ──
     if (freshState.drawdownPaused) {
@@ -1203,6 +1219,62 @@ export async function resetDrawdownStops(botId: number): Promise<void> {
     lastUpdated: new Date(),
   }).where(eq(botStateTable.id, botId));
   console.log(`[DRAWDOWN] Stops reset — trading resumed from $${st.balance.toFixed(2)}`);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MANUAL CANCEL — force-cancel an open LIVE or TEST position
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Manually cancel an open trade:
+ *  - For LIVE trades: attempts to cancel the on-chain order via Polymarket API
+ *    (best-effort; proceeds even if the cancel call fails since the window may
+ *    have already expired).
+ *  - Marks the DB record as "cancelled" and refunds positionSize to balance.
+ *  - Decrements dailyTradeCount so the cancelled trade doesn't burn a slot.
+ */
+export async function cancelLivePosition(tradeId: number): Promise<{ ok: boolean; message: string }> {
+  const [trade] = await db.select().from(tradesTable).where(eq(tradesTable.id, tradeId));
+  if (!trade) return { ok: false, message: `Trade #${tradeId} not found` };
+  if (trade.status !== "open") return { ok: false, message: `Trade #${tradeId} is already ${trade.status}` };
+
+  const info = decode5mMarketId(trade.marketId ?? "");
+  const orderId = info?.orderId ?? null;
+
+  // Attempt to cancel the order at Polymarket (LIVE trades only, best-effort)
+  if (trade.mode === "live" && orderId) {
+    try {
+      const { cancelOrder } = await import("./polymarketOrder.js");
+      const cancelled = await cancelOrder(orderId);
+      console.log(`[CANCEL] Polymarket cancel for order ${orderId}: ${cancelled ? "OK" : "failed/already settled"}`);
+    } catch (err) {
+      console.warn(`[CANCEL] Polymarket cancel attempt threw:`, err);
+    }
+  }
+
+  // Remove from in-flight and pending sets
+  if (info?.windowEnd) {
+    inFlightBuyWindows.delete(info.windowEnd);
+    attemptedWindowEnds.delete(info.windowEnd);
+  }
+  pendingSellTradeIds.delete(tradeId);
+  resolvingTradeIds.delete(tradeId);
+
+  // Mark cancelled in DB and refund balance
+  const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, trade.botId));
+  if (!st) return { ok: false, message: "Bot state not found" };
+
+  await db.update(tradesTable).set({ status: "cancelled", resolvedAt: new Date() })
+    .where(eq(tradesTable.id, tradeId));
+
+  await db.update(botStateTable).set({
+    balance: st.balance + trade.positionSize,
+    dailyTradeCount: Math.max(0, (st.dailyTradeCount ?? 1) - 1),
+    lastUpdated: new Date(),
+  }).where(eq(botStateTable.id, trade.botId));
+
+  console.log(`[CANCEL] Trade #${tradeId} (${trade.mode.toUpperCase()} ${trade.direction}) force-cancelled — $${trade.positionSize.toFixed(2)} refunded`);
+  return { ok: true, message: `Trade #${tradeId} cancelled, $${trade.positionSize.toFixed(2)} refunded` };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
