@@ -297,7 +297,7 @@ const EDGE_ENTRY_MIN = 51;   // don't overlap with the late-snipe zone (matches 
 
 // Risk management constants
 const MAX_POSITION_PCT  = 0.25; // hard cap: never risk more than 25% of balance on a single trade
-const MAX_DAILY_TRADES  = 100;  // safety valve: pause new entries if ≥ 100 trades placed today
+const MAX_DAILY_TRADES  = 1000;  // safety valve: pause new entries if ≥ 100 trades placed today
 
 // LATE mode stop-loss: exit if market moves ≥ 10¢ against us.
 // Prevents holding to a full binary loss (100% drawdown) when the market has clearly rejected the signal.
