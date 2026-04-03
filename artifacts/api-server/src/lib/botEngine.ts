@@ -1944,10 +1944,26 @@ async function executeLiveTrade(
         const liveIntended = direction === "YES" ? liveUpPrice : liveDownPrice;
         const intended     = direction === "YES" ? marketPrice  : 1 - marketPrice;
         const slippage = liveIntended - intended; // positive = moved against us (price went up)
-        if (slippage > slippageLimitCents / 100) {
-          console.warn(`[LIVE] Slippage protection: price moved ${(slippage * 100).toFixed(1)}¢ against us (intended ${(intended*100).toFixed(1)}¢ → live ${(liveIntended*100).toFixed(1)}¢) — skipping`);
-          return { geoblocked: false, slippageSkip: true };
-        }
+       const liveProb = liveIntended; // already in probability form
+const newEdge =
+  direction === "YES"
+    ? modelProb - liveProb
+    : (1 - modelProb) - liveProb;
+
+const maxSlippage = slippageLimitCents / 100;
+
+// 🚨 NEW LOGIC
+if (slippage > maxSlippage && newEdge < MIN_EDGE_THRESHOLD) {
+  console.warn(`[LIVE] Slippage too high AND edge gone — skipping`);
+  return { geoblocked: false, slippageSkip: true };
+}
+
+// ✅ OTHERWISE: TAKE THE TRADE
+if (slippage > maxSlippage) {
+  console.log(`[LIVE] Slippage high but edge still ${(
+    newEdge * 100
+  ).toFixed(2)}% — executing`);
+}
         if (Math.abs(slippage) > 0.005) {
           console.log(`[LIVE] Slight slippage: ${(slippage * 100).toFixed(1)}¢ (within tolerance)`);
         }
