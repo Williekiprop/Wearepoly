@@ -756,11 +756,11 @@ async function runBotCycle(botId: number) {
     const EDGE_MAX_CERTAINTY = 0.75;  // 75¢ cap in EDGE — still 4+ min of repricing risk
     // LATE mode: only enter when entry side is in the 30–80¢ sweet spot.
     // Below 30¢ = long-shot with thin expected value; above 80¢ = overpriced, upside too small.
-    const LATE_MIN_PRICE = 0.30;
+    const LATE_MIN_PRICE = 0.50;
     const LATE_MAX_PRICE = 0.80;
 
     const priceTooCertain = isEdgeMode
-      ? Math.max(upPrice, downPrice) > EDGE_MAX_CERTAINTY
+      ? (Math.max(upPrice, downPrice) > EDGE_MAX_CERTAINTY || entryPrice < 0.50)
       : entryPrice < LATE_MIN_PRICE || entryPrice > LATE_MAX_PRICE;
 
     // Dead-zone filter (EDGE mode only — price zones where model consistently underperforms
@@ -769,7 +769,8 @@ async function runBotCycle(botId: number) {
     const inNoMansLand = isEdgeMode && (
       upPrice < 0.30 ||                        // very cheap — market momentum already baked in
       (upPrice >= 0.31 && upPrice <= 0.45) ||  // EDGE dead zone: YES side
-      (upPrice >= 0.55 && upPrice <= 0.69)     // EDGE dead zone: NO side
+      (upPrice >= 0.55 && upPrice <= 0.69)  
+       && edge < 0.08 // EDGE dead zone: NO side
     );
 
     // Edge threshold — LATE uses a flat 8%; EDGE uses the direction-aware stored threshold
@@ -875,7 +876,7 @@ async function runBotCycle(botId: number) {
         : priceTooCertain ? (isEdgeMode
             ? `PRICE_CAP (${certainSide} > ${(EDGE_MAX_CERTAINTY*100).toFixed(0)}¢ max)`
             : entryPrice < LATE_MIN_PRICE
-              ? `PRICE_LOW (entry ${(entryPrice*100).toFixed(1)}¢ < 30¢ min)`
+              ? `PRICE_LOW (entry ${(entryPrice*100).toFixed(1)}¢ < 40¢ min)`
               : `PRICE_HIGH (entry ${(entryPrice*100).toFixed(1)}¢ > 80¢ max)`)
         : inNoMansLand ? `NO_MANS_LAND (UP=${(upPrice*100).toFixed(1)}¢ — EDGE dead zone)`
         : edgeTooHigh ? `EDGE_TOO_HIGH (${edgePct}% > ${(effectiveEdgeCap*100).toFixed(0)}% cap${flow.flowConfirmed ? " [flow-confirmed cap]" : ""})`
