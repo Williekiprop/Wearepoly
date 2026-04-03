@@ -766,12 +766,14 @@ async function runBotCycle(botId: number) {
     // Dead-zone filter (EDGE mode only — price zones where model consistently underperforms
     // with 8¢ SL. These zones were calibrated on 108 EDGE mode trades and are INVALID for LATE mode
     // where the price converges to binary in the final 40s).
+    
     const inNoMansLand = isEdgeMode && (
-      upPrice < 0.30 ||                        // very cheap — market momentum already baked in
-      (upPrice >= 0.31 && upPrice <= 0.45) ||  // EDGE dead zone: YES side
-      (upPrice >= 0.55 && upPrice <= 0.69)  
-       && edge < 0.08 // EDGE dead zone: NO side
+      upPrice >= 0.45 &&
+      upPrice <= 0.55 && 
+       edge < dynamicEdgeThreshold // EDGE dead zone: NO side
+      const dynamicEdgeThreshold = 0.04 + Math.abs(btc1m) * 2;
     );
+    
 
     // Edge threshold — LATE uses a flat 8%; EDGE uses the direction-aware stored threshold
     const directionEdgeThreshold = isEdgeMode
