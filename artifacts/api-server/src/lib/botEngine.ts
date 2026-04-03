@@ -766,12 +766,26 @@ async function runBotCycle(botId: number) {
     // Dead-zone filter (EDGE mode only — price zones where model consistently underperforms
     // with 8¢ SL. These zones were calibrated on 108 EDGE mode trades and are INVALID for LATE mode
     // where the price converges to binary in the final 40s).
-    
+    const safeEdge = typeof edge === "number" ? edge : 0;
+    const safeIsEdgeMode = typeof isEdgeMode === "boolean" ? isEdgeMode : false;
+
+    const dynamicEdgeThreshold = 0.04 + Math.abs(btc1m || 0) * 2;
+
+    const inNoMansLand = safeIsEdgeMode && (
+
+      upPrice >= 0.45 &&
+
+      upPrice <= 0.55 &&
+
+      safeEdge < dynamicEdgeThreshold
+    );
     const inNoMansLand = isEdgeMode && (
       upPrice >= 0.45 &&
       upPrice <= 0.55 && 
        edge < dynamicEdgeThreshold // EDGE dead zone: NO side
       const dynamicEdgeThreshold = 0.04 + Math.abs(btc1m) * 2;
+    if (typeof edge !== "number") {
+    console.log("EDGE UNDEFINED", edge);
     );
     
 
