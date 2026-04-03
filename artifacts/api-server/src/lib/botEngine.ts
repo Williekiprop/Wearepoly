@@ -1927,7 +1927,11 @@ async function executeLiveTrade(
   // LATE mode: tolerate up to 15¢ slippage — prices move fast in the final 40s
   // and we need the edge to still be positive at the live price, not just < 1¢ drift.
   // EDGE mode: tight 1¢ tolerance since mid-window prices are more stable.
-  const slippageLimitCents = edgeMode ? 1 : 15;
+let slippageLimitCents = 5;
+
+if (edge > 0.07) slippageLimitCents = 10;
+if (edge > 0.10) slippageLimitCents = 15;
+if (edge > 0.15) slippageLimitCents = 25;
   if (conditionId) {
     try {
       const priceRes = await fetch(`https://clob.polymarket.com/markets/${conditionId}`, {
