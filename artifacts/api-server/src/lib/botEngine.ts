@@ -771,14 +771,6 @@ async function runBotCycle(botId: number) {
 
     const dynamicEdgeThreshold = 0.04 + Math.abs(btc1m || 0) * 2;
 
-    const inNoMansLand = safeIsEdgeMode && (
-
-      upPrice >= 0.45 &&
-
-      upPrice <= 0.55 &&
-
-      safeEdge < dynamicEdgeThreshold
-    );
     const inNoMansLand = isEdgeMode && (
       upPrice >= 0.45 &&
       upPrice <= 0.55 && 
