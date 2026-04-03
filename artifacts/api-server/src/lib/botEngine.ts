@@ -769,16 +769,21 @@ async function runBotCycle(botId: number) {
     const safeEdge = typeof edge === "number" ? edge : 0;
     const safeIsEdgeMode = typeof isEdgeMode === "boolean" ? isEdgeMode : false;
 
+    // ✅ define ONCE, outside
     const dynamicEdgeThreshold = 0.04 + Math.abs(btc1m || 0) * 2;
-
+    
+    // ✅ safety check (optional but clean)
+    if (typeof edge !== "number") {
+      console.log("EDGE UNDEFINED", edge);
+    }
+    
+    // ✅ condition (ONLY boolean logic inside)
     const inNoMansLand = isEdgeMode && (
       upPrice >= 0.45 &&
-      upPrice <= 0.55 && 
-       edge < dynamicEdgeThreshold // EDGE dead zone: NO side
-      const dynamicEdgeThreshold = 0.04 + Math.abs(btc1m) * 2;
-    if (typeof edge !== "number") {
-    console.log("EDGE UNDEFINED", edge);
+      upPrice <= 0.55 &&
+      edge < dynamicEdgeThreshold
     );
+
     
 
     // Edge threshold — LATE uses a flat 8%; EDGE uses the direction-aware stored threshold
