@@ -18,7 +18,7 @@ COPY */package.json ./
 COPY **/*/package.json ./
 
 # Install everything (dev deps included for build)
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+RUN --mount=type=cache,id=pnpm-cache,target=/pnpm/store \
     pnpm install --frozen-lockfile --prefer-offline
 
 # Copy source code
