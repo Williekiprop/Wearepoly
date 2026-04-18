@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1
+
+# ── Stage 1: install all workspace dependencies ──────────────────────────────
+FROM node:22-alpine AS deps
+
+# Install pnpm
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Copy workspace manifests and lockfile first for layer caching
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+COPY lib/api-spec/package.json        lib/api-spec/package.json
+COPY lib/api-zod/package.json         lib/api-zod/package.json
+COPY lib/api-client-react/package.json lib/api-client-react/package.json
+COPY lib/db/package.json              lib/db/package.json
+COPY artifacts/api-server/package.json  artifacts/api-server/package.json
+COPY artifacts/polymarket-bot/package.json artifacts/polymarket-bot/package.json
+COPY scripts/package.json             scripts/package.json
+
+# Install all dependencies (including devDependencies needed for build)
+RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+
+# ── Stage 2: build ────────────────────────────────────────────────────────────
+FROM deps AS builder
+
+WORKDIR /app
+
+# Copy full source
+COPY . .
+
+# Build @workspace/polymarket-bot (Vite) and @workspace/api-server (esbuild)
+RUN pnpm --filter @workspace/polymarket-bot run build
+RUN pnpm --filter @workspace/api-server run build
+
+# ── Stage 3: production image ─────────────────────────────────────────────────
+FROM node:22-alpine AS runner
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Copy workspace manifests and lockfile
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+COPY lib/api-spec/package.json        lib/api-spec/package.json
+COPY lib/api-zod/package.json         lib/api-zod/package.json
+COPY lib/api-client-react/package.json lib/api-client-react/package.json
+COPY lib/db/package.json              lib/db/package.json
+COPY artifacts/api-server/package.json  artifacts/api-server/package.json
+COPY artifacts/polymarket-bot/package.json artifacts/polymarket-bot/package.json
+COPY scripts/package.json             scripts/package.json
+
+# Install production dependencies only
+RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile --prod
+
+# Copy built artifacts from builder stage
+COPY --from=builder /app/artifacts/api-server/dist  artifacts/api-server/dist
+COPY --from=builder /app/artifacts/polymarket-bot/dist artifacts/polymarket-bot/dist
+
+ENV NODE_ENV=production
+
+EXPOSE 8080
+
+CMD ["node", "artifacts/api-server/dist/index.cjs"]
