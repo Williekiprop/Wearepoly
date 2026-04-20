@@ -531,8 +531,14 @@ function startPolling(botId: number) {
   // WebSocket feeds BTC price in real-time; cycle can be fast without rate-limit risk.
   // 1.5-second cycle gives 20+ data points in the critical 10–40s entry window,
   // and halves the stop-loss detection lag when prices gap through the threshold.
-  pollingInterval = setInterval(() => runBotCycle(botId), 1_500);
-  runBotCycle(botId);
+  pollingInterval = setInterval(() => {
+    runBotCycle(botId).catch((err) => {
+      console.error("[BOT] Unhandled error in bot cycle — server continues running:", err);
+    });
+  }, 1_500);
+  runBotCycle(botId).catch((err) => {
+    console.error("[BOT] Unhandled error in bot cycle — server continues running:", err);
+  });
 }
 
 /**

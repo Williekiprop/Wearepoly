@@ -26,6 +26,12 @@ app.listen(port, "0.0.0.0", async () => {
   await runMigrations();
   // Start the Kraken WebSocket for continuous BTC price data
   startBtcWebSocket();
-  // Auto-resume the bot if it was running before the server restarted
-  await autoResumeBot();
+  // Auto-resume the bot if it was running before the server restarted.
+  // Wrapped in try-catch so a bot startup error never prevents the server
+  // (and frontend) from becoming available.
+  try {
+    await autoResumeBot();
+  } catch (err) {
+    console.error("[BOT] autoResumeBot() failed — server continues running:", err);
+  }
 });
