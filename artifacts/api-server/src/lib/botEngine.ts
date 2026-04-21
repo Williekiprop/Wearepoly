@@ -776,6 +776,7 @@ async function runBotCycle(botId: number) {
     const safeIsEdgeMode = typeof isEdgeMode === "boolean" ? isEdgeMode : false;
 
     // ✅ define ONCE, outside
+    const btc1m = btcData.change1m ?? 0;
     const dynamicEdgeThreshold = 0.04 + Math.abs(btc1m || 0) * 2;
     
     // ✅ safety check (optional but clean)
