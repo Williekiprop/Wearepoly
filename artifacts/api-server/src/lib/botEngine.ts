@@ -776,6 +776,7 @@ async function runBotCycle(botId: number) {
     const safeIsEdgeMode = typeof isEdgeMode === "boolean" ? isEdgeMode : false;
 
     // ✅ define ONCE, outside
+    const chg1m = await getBTC1mCandles(); // returns % change
     const dynamicEdgeThreshold = 0.04 + Math.abs(btc1m || 0) * 2;
     
     // ✅ safety check (optional but clean)
@@ -910,7 +911,6 @@ async function runBotCycle(botId: number) {
       if (inOrNearWindow || Date.now() - _lastNoTradeLogAt > NO_TRADE_LOG_THROTTLE_MS) {
         _lastNoTradeLogAt = Date.now();
         const flowTag = `OBI=${flow.obImbalance >= 0 ? "+" : ""}${flow.obImbalance.toFixed(2)} Δwin=${flow.inWindowDelta >= 0 ? "+" : ""}${flow.inWindowDelta.toFixed(3)}% 5s=${chg5s}${flow.flowConfirmed ? " ✓FLOW" : ""}`;
-        const btc1m = await getBTC1mCandles()
         console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1m=${chg1m} ${flowTag} | ${reason} | ${secStr}`);
       }
     } else {
