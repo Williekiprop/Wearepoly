@@ -915,15 +915,15 @@ async function runBotCycle(botId: number) {
       if (inOrNearWindow || Date.now() - _lastNoTradeLogAt > NO_TRADE_LOG_THROTTLE_MS) {
         _lastNoTradeLogAt = Date.now();
         const flowTag = `OBI=${flow.obImbalance >= 0 ? "+" : ""}${flow.obImbalance.toFixed(2)} Δwin=${flow.inWindowDelta >= 0 ? "+" : ""}${flow.inWindowDelta.toFixed(3)}% 5s=${chg5s}${flow.flowConfirmed ? " ✓FLOW" : ""}`;
-        console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1mChange=${chg1m} ${flowTag} | ${reason} | ${secStr}`);
+        console.log(`[5M] NO_TRADE | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1mChange=${btc1mChange.toFixed(3)}% ${flowTag} | ${reason} | ${secStr}`);
       }
     } else {
       const sizeTag = sizingMultiplier < 1 ? ` [×${sizingMultiplier} drawdown]` : "";
       const flowTag = flow.flowConfirmed ? ` ✓FLOW(OBI=${flow.obImbalance >= 0 ? "+" : ""}${flow.obImbalance.toFixed(2)},Δ${flow.inWindowDelta >= 0 ? "+" : ""}${flow.inWindowDelta.toFixed(3)}%)` : "";
       const dir = isBuyUp ? "BUY_UP" : "BUY_DOWN";
-      console.log(`[5M] ${dir} | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1mChange=${chg1m} 5s=${chg5s} edge=+${edgePct}%${flowTag} size=$${positionSize.toFixed(2)}${sizeTag} | ${secStr}`);
+      console.log(`[5M] ${dir} | UP=${upPct}¢ DOWN=${downPct}¢ model=${probUpPct}% btc1mChange=${btc1mChange.toFixed(3)}% 5s=${chg5s} edge=+${edgePct}%${flowTag} size=$${positionSize.toFixed(2)}${sizeTag} | ${secStr}`);
     }
-
+    
     await db
       .update(botStateTable)
       .set({ currentMarketPrice: upPrice, lastSignal: signal, lastUpdated: new Date() })
