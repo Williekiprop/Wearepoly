@@ -918,7 +918,7 @@ async function runBotCycle(botId: number) {
         const flowTag = `OBI=${flow.obImbalance >= 0 ? "+" : ""}${flow.obImbalance.toFixed(2)} Δwin=${flow.inWindowDelta >= 0 ? "+" : ""}${flow.inWindowDelta.toFixed(3)}% 5s=${(btcData.change5s ?? 0).toFixed(3)}%${flow.flowConfirmed ? " ✓FLOW" : ""}`;
 
         console.log(`[5M] NO_TRADE | UP=${upPrice.toFixed(1)}¢ DOWN=${downPrice.toFixed(1)}¢ model=${(winProb * 100).toFixed(1)}% btc1mChange=${btc1mChange.toFixed(3)}% ${flowTag} | ${reason} | ${market5m.secondsRemaining}s left`);
-      }
+      } 
     } else {
       const sizeTag = sizingMultiplier < 1 ? ` [×${sizingMultiplier} drawdown]` : "";
       const flowTag = flow.flowConfirmed ? ` ✓FLOW(OBI=${flow.obImbalance >= 0 ? "+" : ""}${flow.obImbalance.toFixed(2)},Δ${flow.inWindowDelta >= 0 ? "+" : ""}${flow.inWindowDelta.toFixed(3)}%)` : "";
