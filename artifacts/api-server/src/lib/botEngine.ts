@@ -776,15 +776,20 @@ async function runBotCycle(botId: number) {
     const safeIsEdgeMode = typeof isEdgeMode === "boolean" ? isEdgeMode : false;
 
     // ✅ define ONCE, outside
-    const chg1m = await getBTC1mCandles(); // returns % change
-    const dynamicEdgeThreshold = 0.04 + Math.abs(btc1m || 0) * 2;
-    
-    // ✅ safety check (optional but clean)
+    // Get 1-minute BTC change for dynamic edge threshold
+    // We already have btcData from the Promise.all at the top of the function
+    const btc1mChange = btcData?.change1m ?? 0;   // fallback to 0 if missing
+
+    const dynamicEdgeThreshold = 0.04 + Math.abs(btc1mChange) * 2;
+
+    console.log(`[BOT] 1m BTC change: ${btc1mChange.toFixed(2)}% → dynamic threshold: ${dynamicEdgeThreshold.toFixed(3)}`);
+
+    // âœ… safety check
     if (typeof edge !== "number") {
       console.log("EDGE UNDEFINED", edge);
     }
     
-    // ✅ condition (ONLY boolean logic inside)
+    // âœ… condition (ONLY boolean logic inside)
     const inNoMansLand = isEdgeMode && (
       upPrice >= 0.45 &&
       upPrice <= 0.55 &&
@@ -792,7 +797,6 @@ async function runBotCycle(botId: number) {
     );
 
     
-
     // Edge threshold — LATE uses a flat 8%; EDGE uses the direction-aware stored threshold
     const directionEdgeThreshold = isEdgeMode
       ? (isBuyUp
