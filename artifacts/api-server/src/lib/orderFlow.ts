@@ -192,8 +192,28 @@ export function startOrderFlow(): void {
   console.log("[FLOW] Order-flow feeds started (depth, liquidations, funding)");
 }
 
+// ── Order-flow result cache ───────────────────────────────────────────────────
+// getOrderFlowData is called every bot cycle (every 3s). The underlying signals
+// update on their own schedules (OBI: 500ms WS, liquidations: event-driven,
+// funding: 5min REST). Caching for 2s avoids redundant computeLiqBias() work
+// and keeps the result consistent within a single cycle even if called twice.
+const ORDER_FLOW_CACHE_TTL = 2_000; // ms
+let _cachedFlow: OrderFlowData | null = null;
+let _cachedFlowTs = 0;
+let _cachedFlowBtcPrice = 0;
+
 /** Returns the latest order-flow snapshot for use in signal calculations. */
 export function getOrderFlowData(currentBtcPrice: number): OrderFlowData {
+  const now = Date.now();
+  // Serve from cache if still fresh AND BTC price hasn't changed meaningfully
+  if (
+    _cachedFlow !== null &&
+    now - _cachedFlowTs < ORDER_FLOW_CACHE_TTL &&
+    Math.abs(currentBtcPrice - _cachedFlowBtcPrice) < 1 // < $1 BTC move
+  ) {
+    return _cachedFlow;
+  }
+
   const obImbalance = _obImbalance;
   const liquidationBias = computeLiqBias();
   const fundingBias = _fundingBias;
@@ -206,5 +226,9 @@ export function getOrderFlowData(currentBtcPrice: number): OrderFlowData {
     Math.abs(inWindowDelta) > 0.15 ||
     Math.abs(liquidationBias) > 0.5;
 
-  return { obImbalance, liquidationBias, fundingBias, inWindowDelta, flowConfirmed };
+  const result: OrderFlowData = { obImbalance, liquidationBias, fundingBias, inWindowDelta, flowConfirmed };
+  _cachedFlow = result;
+  _cachedFlowTs = now;
+  _cachedFlowBtcPrice = currentBtcPrice;
+  return result;
 }
