@@ -9,6 +9,8 @@ import {
   useStopBot,
   useResetBot,
   getGetBotStatusQueryKey,
+  getGetMarketAnalysisQueryKey,
+  getGetBtcPriceQueryKey,
   getGetTradesQueryKey
 } from "@workspace/api-client-react";
 
@@ -173,6 +175,7 @@ export function useBotPolling() {
   // flight — prevents the dot from flashing grey on every poll cycle.
   const statusQuery = useGetBotStatus({
     query: {
+      queryKey: getGetBotStatusQueryKey(),
       refetchInterval: 3000,
       staleTime: 2000,
       placeholderData: keepPreviousData,
@@ -184,6 +187,7 @@ export function useBotPolling() {
   // 2. Poll market analysis every 5s only if running, otherwise every 15s to keep UI alive
   const analysisQuery = useGetMarketAnalysis({
     query: {
+      queryKey: getGetMarketAnalysisQueryKey(),
       refetchInterval: isRunning ? 5000 : 15000,
       staleTime: 4000,
       placeholderData: keepPreviousData,
@@ -193,6 +197,7 @@ export function useBotPolling() {
   // 3. Poll BTC price every 10s regardless
   const btcQuery = useGetBtcPrice({
     query: {
+      queryKey: getGetBtcPriceQueryKey(),
       refetchInterval: 10000,
       staleTime: 9000,
       placeholderData: keepPreviousData,
@@ -204,6 +209,7 @@ export function useBotPolling() {
     { limit: 50, offset: 0 }, 
     {
       query: {
+        queryKey: getGetTradesQueryKey({ limit: 50, offset: 0 }),
         refetchInterval: (query) => {
           if (!isRunning) return false;
           const data = query.state.data as { trades?: Array<{ status: string; mode?: string }> } | undefined;
