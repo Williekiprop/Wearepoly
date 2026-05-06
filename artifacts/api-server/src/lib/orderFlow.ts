@@ -48,6 +48,17 @@ const _liqEvents: { usdSize: number; side: "BUY" | "SELL"; ts: number }[] = [];
 let _started = false;
 let _fundingRefreshedAt = 0;
 
+// ── Order-flow result cache ───────────────────────────────────────────────────
+// getOrderFlowData() is called multiple times per cycle (runBotCycle + dashboard).
+// Cache the result for 1 second so repeated calls within the same cycle are free.
+interface CachedFlow {
+  data: OrderFlowData;
+  btcPrice: number;
+  ts: number;
+}
+let _flowCache: CachedFlow | null = null;
+const FLOW_CACHE_TTL_MS = 1_000; // 1 second — safe for a 3s cycle
+
 // ── 1. Order-book imbalance — Binance spot depth WebSocket ────────────────────
 
 function connectDepthWs(): void {
@@ -192,8 +203,21 @@ export function startOrderFlow(): void {
   console.log("[FLOW] Order-flow feeds started (depth, liquidations, funding)");
 }
 
-/** Returns the latest order-flow snapshot for use in signal calculations. */
+/** Returns the latest order-flow snapshot for use in signal calculations.
+ *  Results are cached for FLOW_CACHE_TTL_MS (1s) to avoid redundant computation
+ *  when called multiple times within the same bot cycle (e.g. runBotCycle + dashboard).
+ */
 export function getOrderFlowData(currentBtcPrice: number): OrderFlowData {
+  const now = Date.now();
+  // Return cached result if fresh and BTC price hasn't moved more than 0.1%
+  if (
+    _flowCache &&
+    now - _flowCache.ts < FLOW_CACHE_TTL_MS &&
+    Math.abs(currentBtcPrice - _flowCache.btcPrice) / (_flowCache.btcPrice || 1) < 0.001
+  ) {
+    return _flowCache.data;
+  }
+
   const obImbalance = _obImbalance;
   const liquidationBias = computeLiqBias();
   const fundingBias = _fundingBias;
@@ -206,5 +230,7 @@ export function getOrderFlowData(currentBtcPrice: number): OrderFlowData {
     Math.abs(inWindowDelta) > 0.15 ||
     Math.abs(liquidationBias) > 0.5;
 
-  return { obImbalance, liquidationBias, fundingBias, inWindowDelta, flowConfirmed };
+  const data: OrderFlowData = { obImbalance, liquidationBias, fundingBias, inWindowDelta, flowConfirmed };
+  _flowCache = { data, btcPrice: currentBtcPrice, ts: now };
+  return data;
 }
