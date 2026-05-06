@@ -66,15 +66,10 @@ const attemptedWindowEnds = new Set<number>();
 // overlap (possible if a CLOB query takes longer than the 3s cycle interval).
 const resolvingTradeIds = new Set<number>();
 
-// Balance refresh: fetch on-chain wallet balance every N cycles and sync to DB
-// Cycle is now 3s → 20 cycles ≈ 60 seconds
-let _balanceRefreshCounter = 0;
-const BALANCE_REFRESH_EVERY_N_CYCLES = 20; // every ~60 seconds at 3s/cycle
-
 // Log throttle: suppress repeated NO_TRADE / TOO_EARLY logs
-// Only print once per 15 seconds unless in the entry window
+// Only print once per 30 seconds unless in the entry window
 let _lastNoTradeLogAt = 0;
-const NO_TRADE_LOG_THROTTLE_MS = 15_000;
+const NO_TRADE_LOG_THROTTLE_MS = 30_000;
 
 const browserOrderQueue: PendingBrowserOrder[] = [];
 
@@ -86,23 +81,27 @@ const browserOrderQueue: PendingBrowserOrder[] = [];
 const inFlightBuyWindows = new Map<number, number>();
 
 // ── LATE-mode price drift ring buffer ────────────────────────────────────────
-// Stores the last ~N upPrice samples per window so we can detect whether the
-// market is running against our signal before we enter.  Keyed by windowEnd.
-// Each entry is {ts: epochMs, upPrice: 0-1}.  Older than 30s are pruned each cycle.
-const latePriceHistory = new Map<number, { ts: number; upPrice: number }[]>();
+// Stores the last ~N upPrice samples so we can detect whether the market is
+// running against our signal before we enter.
+// Simple array (not a Map) — only one active window at a time in the late zone.
+// Each entry is {ts: epochMs, upPrice: 0-1, windowEnd: number}.
+let _latePriceHistory: { ts: number; upPrice: number; windowEnd: number }[] = [];
 
 function recordLatePriceSample(windowEnd: number, upPrice: number) {
-  const buf = latePriceHistory.get(windowEnd) ?? [];
-  buf.push({ ts: Date.now(), upPrice });
+  const now = Date.now();
+  // Prune samples older than 60s or from a different window
+  _latePriceHistory = _latePriceHistory.filter(
+    s => s.windowEnd === windowEnd && now - s.ts < 60_000
+  );
+  _latePriceHistory.push({ ts: now, upPrice, windowEnd });
   // Keep at most the last 20 samples (~60s at 3s poll rate)
-  if (buf.length > 20) buf.shift();
-  latePriceHistory.set(windowEnd, buf);
+  if (_latePriceHistory.length > 20) _latePriceHistory.shift();
 }
 
 /** Returns the upPrice LATE_PRICE_DRIFT_WINDOW_MS ago, or null if no sample that old. */
 function priceBeforeDriftWindow(windowEnd: number): number | null {
-  const buf = latePriceHistory.get(windowEnd);
-  if (!buf || buf.length < 2) return null;
+  const buf = _latePriceHistory.filter(s => s.windowEnd === windowEnd);
+  if (buf.length < 2) return null;
   const cutoff = Date.now() - LATE_PRICE_DRIFT_WINDOW_MS;
   // Find the oldest sample that is still within 2× the drift window (don't go too far back)
   const oldSample = buf.find(s => s.ts <= cutoff);
@@ -535,14 +534,45 @@ function startPolling(botId: number) {
   stopPolling();
   // Start order-flow feeds (idempotent — safe to call multiple times)
   startOrderFlow();
-  // WebSocket feeds BTC price in real-time; cycle can be fast without rate-limit risk.
-  // 1.5-second cycle gives 20+ data points in the critical 10–40s entry window,
-  // and halves the stop-loss detection lag when prices gap through the threshold.
+
+  // ── 3-second main cycle ───────────────────────────────────────────────────
+  // Handles signal evaluation, TP/SL checks, and position management.
+  // updateWindowOpen is called here (not inside runBotCycle) to keep the hot
+  // path lean — window transitions are rare and don't need per-cycle overhead.
   pollingInterval = setInterval(() => {
+    // Snapshot the current BTC price for window-open tracking without blocking
+    // the main cycle on an async call. getBtcPriceData() reads from an in-memory
+    // WebSocket cache so this is effectively synchronous (no network I/O).
+    getBtcPriceData().then(btcData => {
+      fetchCurrent5mMarket().then(market5m => {
+        if (market5m) updateWindowOpen(String(market5m.windowEnd), btcData.currentPrice);
+      }).catch(() => {});
+    }).catch(() => {});
+
     runBotCycle(botId).catch((err) => {
       console.error("[BOT] Unhandled error in bot cycle — server continues running:", err);
     });
-  }, 1_500);
+  }, 3_000);
+
+  // ── 120-second balance refresh (LIVE mode only) ───────────────────────────
+  // Moved out of the hot path to avoid adding a getWalletBalance() RPC call
+  // (50-200ms) to every cycle. Fires independently every 2 minutes.
+  setInterval(() => {
+    db.select().from(botStateTable).limit(1).then(([state]) => {
+      if (!state?.running || state.mode !== "live") return;
+      getWalletBalance().then(onChainBalance => {
+        if (onChainBalance !== null && onChainBalance > 0) {
+          const diff = Math.abs(onChainBalance - state.balance);
+          if (diff > 0.01) {
+            console.log(`[LIVE] Balance sync (120s): DB ${state.balance.toFixed(4)} → on-chain ${onChainBalance.toFixed(4)}`);
+            db.update(botStateTable).set({ balance: onChainBalance, lastUpdated: new Date() })
+              .where(eq(botStateTable.id, botId)).catch(() => {});
+          }
+        }
+      }).catch(() => {});
+    }).catch(() => {});
+  }, 120_000);
+
   runBotCycle(botId).catch((err) => {
     console.error("[BOT] Unhandled error in bot cycle — server continues running:", err);
   });
@@ -635,24 +665,6 @@ async function runBotCycle(botId: number) {
     const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
     if (!state || !state.running) return;
 
-    // ── Periodic on-chain wallet balance sync (LIVE mode only) ──
-    if (state.mode === "live") {
-      _balanceRefreshCounter++;
-      if (_balanceRefreshCounter % BALANCE_REFRESH_EVERY_N_CYCLES === 0) {
-        const onChainBalance = await getWalletBalance();
-        if (onChainBalance !== null && onChainBalance > 0) {
-          const diff = Math.abs(onChainBalance - state.balance);
-          if (diff > 0.01) { // only update if meaningfully different (> 1¢)
-            console.log(`[LIVE] Balance sync: DB $${state.balance.toFixed(4)} → on-chain $${onChainBalance.toFixed(4)}`);
-            await db.update(botStateTable).set({
-              balance: onChainBalance,
-              lastUpdated: new Date(),
-            }).where(eq(botStateTable.id, botId));
-          }
-        }
-      }
-    }
-
     // Fetch live data in parallel
     const [btcData, market5m] = await Promise.all([
       getBtcPriceData(),
@@ -704,8 +716,8 @@ async function runBotCycle(botId: number) {
     }
 
     // ── Step 2: 5m market signal + order-flow overlay ────────────────────────
-    // Track window transitions so in-window delta knows where BTC opened
-    updateWindowOpen(String(market5m.windowEnd), btcData.currentPrice);
+    // Note: updateWindowOpen is called in the setInterval wrapper (not here) to
+    // keep the hot path lean. Window transitions are rare; no need to call every cycle.
     const flow = getOrderFlowData(btcData.currentPrice);
 
     // prob_up = our estimated probability that BTC ends this window HIGHER.
@@ -939,8 +951,8 @@ async function runBotCycle(botId: number) {
         : velocityConflict ? `VELOCITY_CONFLICT (BTC 5s=${(btcVelocity5s||0).toFixed(4)} opposes signal)`
         : momentumMismatch ? `MOMENTUM_MISMATCH (velocity/flow/accel disagree — top 1% filter)`
         : `edge ${edge.toFixed(4)} < dynamic threshold ${dynamicMinEdge.toFixed(4)} (regime-adjusted)`;
-      // Throttle: with 3s cycles, log at most once per 15s to reduce noise.
-       // Always log if we're in (or near) the entry window.
+      // Throttle: with 3s cycles, log at most once per 30s to reduce noise.
+      // Always log if we're in (or near) the entry window.
       const inOrNearWindow = !tooEarly;
       if (inOrNearWindow || Date.now() - _lastNoTradeLogAt > NO_TRADE_LOG_THROTTLE_MS) {
         _lastNoTradeLogAt = Date.now();
