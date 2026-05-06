@@ -316,7 +316,7 @@ function processWindow(meta: MarketMeta, candles: Map<number, number>): Backtest
   const btcWindowMove  = ((btcWindowEnd - btcWindowOpen) / btcWindowOpen) * 100;
 
   // Model estimation (OBI, liquidations, funding = 0 — not available historically)
-  const btcData = { currentPrice: btcEntry, change1m, change5m, change1h, history: [] };
+  const btcData = { currentPrice: btcEntry, change1m, change5m, change1h, change24h: 0, change5s: 0, change10s: 0, change15s: 0, change30s: 0, candles: [], fetchedAt: new Date().toISOString(), source: "http" as const };
   const flowData = {
     obImbalance:     0,
     inWindowDelta,

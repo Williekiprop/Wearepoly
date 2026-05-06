@@ -120,7 +120,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
     });
   };
 
-  const getAuthHeader = () => {
+  const getAuthHeader = (): Record<string, string> => {
     try {
       const token = typeof localStorage !== "undefined" ? localStorage.getItem("AUTH_TOKEN") : null;
       if (token) return { Authorization: `Bearer ${token}` };
