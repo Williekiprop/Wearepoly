@@ -6,12 +6,15 @@
  *    - Zero rate-limit risk: single persistent connection replaces all polling
  *    - Auto-reconnects with exponential backoff
  *
- * 2. Kraken HTTP OHLC (refreshed every 60s)
+ * 2. Kraken HTTP OHLC (refreshed every 120s — reduced to lower rate-limit risk)
  *    - 1-minute candles for change1m / change5m / change1h calculations
- *    - Only needs refreshing once per minute — vastly reduced call frequency
+ *    - OPTIONAL: if the HTTP API is unavailable, momentum is approximated from
+ *      the WebSocket tick ring buffer so the bot can trade without candles.
  *
  * The in-memory cache is always fresh because the WebSocket patches the
  * current-price field on every tick, without waiting for the HTTP refresh.
+ * Candle failures are non-blocking — the bot degrades gracefully to
+ * WebSocket-only mode rather than halting entirely.
  */
 
 export interface BtcCandle {
@@ -46,7 +49,8 @@ let currentPrice = 0;
 let openPrice24h = 0;
 let candles: BtcCandle[] = [];
 let lastCandleRefresh = 0;
-const CANDLE_REFRESH_INTERVAL = 60_000; // refresh OHLC candles once per minute
+let candlesAvailable = false; // false until at least one successful HTTP fetch
+const CANDLE_REFRESH_INTERVAL = 120_000; // refresh OHLC candles every 2 minutes (reduced to lower rate-limit risk)
 
 // ── Short-term tick ring buffer ───────────────────────────────────────────────
 // Stores timestamped BTC prices from the Kraken WebSocket for the last 60 seconds.
@@ -93,6 +97,9 @@ let latestData: BtcPriceData = {
   source: "http",
 };
 
+// Throttle the WebSocket-only mode log to once per minute
+let _lastWsOnlyLogAt = 0;
+
 // ── Candle history HTTP refresh ──────────────────────────────────────────────
 
 async function refreshCandles(): Promise<void> {
@@ -106,7 +113,13 @@ async function refreshCandles(): Promise<void> {
       }),
     ]);
 
-    if (!tickerRes.ok || !ohlcRes.ok) throw new Error("Kraken OHLC fetch failed");
+    if (!tickerRes.ok || !ohlcRes.ok) {
+      console.error(
+        `[BTC] Kraken HTTP API error — ticker: HTTP ${tickerRes.status}, OHLC: HTTP ${ohlcRes.status}` +
+        ` — falling back to WebSocket-only mode`
+      );
+      return; // non-blocking: bot continues with WebSocket data
+    }
 
     const [tickerJson, ohlcJson] = await Promise.all([
       tickerRes.json() as Promise<{
@@ -121,7 +134,13 @@ async function refreshCandles(): Promise<void> {
       }>,
     ]);
 
-    if (tickerJson.error?.length || ohlcJson.error?.length) throw new Error("Kraken API errors");
+    if (tickerJson.error?.length || ohlcJson.error?.length) {
+      console.error(
+        `[BTC] Kraken API returned errors — ticker: [${tickerJson.error?.join(", ")}],` +
+        ` OHLC: [${ohlcJson.error?.join(", ")}] — falling back to WebSocket-only mode`
+      );
+      return; // non-blocking: bot continues with WebSocket data
+    }
 
     const ticker = tickerJson.result.XXBTZUSD;
     const rawPrice = parseFloat(ticker.c[0]);
@@ -157,24 +176,54 @@ async function refreshCandles(): Promise<void> {
       });
     }
 
+    candlesAvailable = true;
     lastCandleRefresh = Date.now();
     rebuildSnapshot("http");
     console.log(`[BTC] Candles refreshed — ${candles.length} bars, latest price $${currentPrice.toFixed(2)}`);
   } catch (err) {
-    console.error("[BTC] Candle refresh error:", err);
+    // Network error, timeout, or parse failure — log and continue in WebSocket-only mode
+    console.error("[BTC] Candle refresh error (non-fatal, using WebSocket-only mode):", err);
   }
 }
 
 // ── Snapshot builder — called on every WebSocket tick or candle refresh ──────
 
 function rebuildSnapshot(source: "websocket" | "http"): void {
-  const price1mAgo = candles.length >= 2 ? candles[candles.length - 2].close : currentPrice;
-  const price5mAgo = candles.length >= 6 ? candles[candles.length - 6].close : currentPrice;
-  const price1hAgo = candles[0]?.close ?? currentPrice;
+  // ── Momentum calculations ─────────────────────────────────────────────────
+  // Primary source: OHLC candles (accurate 1-minute bars from Kraken HTTP API).
+  // Fallback source: WebSocket tick ring buffer (approximated from recent ticks).
+  // The tick buffer only holds 60s of history, so change1h falls back to 0 when
+  // candles are unavailable — acceptable degradation vs. blocking the bot entirely.
+  let price1mAgo: number;
+  let price5mAgo: number;
+  let price1hAgo: number;
+
+  if (candlesAvailable && candles.length >= 2) {
+    // Candles available — use accurate OHLC data
+    price1mAgo = candles[candles.length - 2].close;
+    price5mAgo = candles.length >= 6 ? candles[candles.length - 6].close : currentPrice;
+    price1hAgo = candles[0]?.close ?? currentPrice;
+  } else {
+    // WebSocket-only mode — approximate from tick ring buffer
+    // change1m ≈ price 60s ago; change5m ≈ price 60s ago (best we have in buffer);
+    // change1h is unavailable without candles, so we leave it at 0.
+    const p60s = priceNSecondsAgo(60);
+    price1mAgo = p60s ?? currentPrice;
+    price5mAgo = p60s ?? currentPrice; // tick buffer only holds 60s; best approximation
+    price1hAgo = currentPrice;         // no 1h history without candles → change1h = 0
+    if (!candlesAvailable && currentPrice > 0) {
+      // Only log once per minute to avoid log spam
+      const now = Date.now();
+      if (now - _lastWsOnlyLogAt > 60_000) {
+        console.log("[BTC] WebSocket-only mode — momentum approximated from tick buffer (candles unavailable)");
+        _lastWsOnlyLogAt = now;
+      }
+    }
+  }
 
   const change1m = price1mAgo > 0 ? ((currentPrice - price1mAgo) / price1mAgo) * 100 : 0;
   const change5m = price5mAgo > 0 ? ((currentPrice - price5mAgo) / price5mAgo) * 100 : 0;
-  const change1h = price1hAgo > 0 ? ((currentPrice - price1hAgo) / price1hAgo) * 100 : 0;
+  const change1h = price1hAgo > 0 && price1hAgo !== currentPrice ? ((currentPrice - price1hAgo) / price1hAgo) * 100 : 0;
   const change24h = openPrice24h > 0 ? ((currentPrice - openPrice24h) / openPrice24h) * 100 : 0;
 
   // Short-term velocity from the tick ring buffer
@@ -240,6 +289,7 @@ function connectKrakenWs(): void {
     }));
   };
 
+
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data as string) as {
@@ -295,8 +345,11 @@ function connectKrakenWs(): void {
 export function startBtcWebSocket(): void {
   if (wsStarted) return;
   wsStarted = true;
-  // Seed candles via HTTP first, then open WebSocket
-  refreshCandles().then(() => connectKrakenWs()).catch(() => connectKrakenWs());
+  // Start WebSocket immediately — don't block on HTTP candle fetch.
+  // Candles are fetched in the background; the bot trades on WebSocket data
+  // from the first tick even if the Kraken HTTP API is unavailable.
+  connectKrakenWs();
+  refreshCandles().catch(() => {}); // background, non-blocking
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -304,18 +357,24 @@ export function startBtcWebSocket(): void {
 /**
  * Returns the latest BTC price data from the in-memory cache.
  * Data is continuously updated by the Kraken WebSocket — no HTTP call is made
- * unless the candle history needs a refresh (once per minute).
+ * unless the candle history needs a refresh (every 2 minutes).
+ *
+ * This function is non-blocking: it never awaits the Kraken HTTP API.
+ * If candles are unavailable (API down / rate-limited), the bot operates in
+ * WebSocket-only mode with momentum approximated from the tick ring buffer.
  */
 export async function getBtcPriceData(): Promise<BtcPriceData> {
-  // If WebSocket is not started (first call), fall back to HTTP and start WS
+  // Ensure WebSocket is running — idempotent, safe to call repeatedly
   if (!wsStarted) {
-    startBtcWebSocket();
-    await refreshCandles();
+    startBtcWebSocket(); // non-blocking: starts WS + background candle fetch
   }
 
-  // If we somehow have no price yet, do a one-off HTTP fetch
-  if (currentPrice === 0) {
-    await refreshCandles();
+  // If we have no price yet (WebSocket not yet connected), kick off a background
+  // candle fetch to try to seed the price from HTTP — but don't await it.
+  // The caller will get currentPrice=0 on the very first call if WS hasn't
+  // connected yet; subsequent calls (after ~1s) will have a live price.
+  if (currentPrice === 0 && !candlesAvailable) {
+    refreshCandles().catch(() => {}); // background, non-blocking
   }
 
   // Refresh candle history if overdue (rare: only if WS didn't trigger it)
