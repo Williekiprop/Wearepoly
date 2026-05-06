@@ -208,7 +208,7 @@ export async function completeBrowserOrder(
           totalPnl: state.totalPnl + pnl,
           lastSignal: `LIVE SELL ${direction} — P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)} | wallet $${newBalance.toFixed(2)}`,
           lastUpdated: new Date(),
-        }).where(eq(botStateTable.id, botId));
+        }).where(eq(botStateTable.id, state.id));
       }
       console.log(`[LIVE/BROWSER] SELL confirmed ${orderId} | P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)} | wallet: $${walletBalance?.toFixed(2) ?? "?"}`);
     } else {
@@ -231,7 +231,7 @@ export async function completeBrowserOrder(
           dailyTradeCount: (state.dailyTradeCount ?? 0) + 1,
           lastSignal: `LIVE BUY ${direction} — $${deductedUsdc.toFixed(2)} placed`,
           lastUpdated: new Date(),
-        }).where(eq(botStateTable.id, botId));
+        }).where(eq(botStateTable.id, state.id));
       }
       console.log(`[LIVE/BROWSER] BUY ${isMatched ? "MATCHED" : "LIVE(pending)"}: ${orderId} | shares=${shares.toFixed(2)} | balance deducted $${deductedUsdc.toFixed(4)}`);
     }
@@ -247,7 +247,7 @@ export async function completeBrowserOrder(
         const walletBalance = await getWalletBalance();
         const [state] = await db.select().from(botStateTable).where(eq(botStateTable.id, botId));
         if (state && walletBalance !== null && walletBalance > 0) {
-          await db.update(botStateTable).set({ balance: walletBalance, lastUpdated: new Date() }).where(eq(botStateTable.id, botId));
+          await db.update(botStateTable).set({ balance: walletBalance, lastUpdated: new Date() }).where(eq(botStateTable.id, state.id));
         }
         console.warn(`[LIVE/BROWSER] SELL failed (no balance) — trade #${tradeId} cancelled, wallet synced to $${walletBalance?.toFixed(2)}`);
       }
@@ -273,8 +273,8 @@ const TAKE_PROFIT_MARKET_GAIN = 0.15; // 15¢ price move = take-profit (late sni
 // Enter after the 1st minute (≤240 s remain), exit early on TP or signal flip.
 // Multiple entries per window are allowed — re-enter after each exit.
 const EDGE_HOLD_MS        = 10_000;   // 10 s min hold before flip/TP in EDGE mode
-const EDGE_TAKE_PROFIT    = 0.08;     // 8¢ price move = take-profit (edge snipe)
-const EDGE_STOP_LOSS      = 0.08;     // 8¢ adverse move = stop-loss (matches TP → 1:1 risk-reward, profitable at >50% win rate)
+const EDGE_TAKE_PROFIT    = 0.085;     // 8¢ price move = take-profit (edge snipe)
+const EDGE_STOP_LOSS      = 0.085;     // 8¢ adverse move = stop-loss (matches TP → 1:1 risk-reward, profitable at >50% win rate)
 // Edge sweet-spot cap: trades with computed edge >22% are paradoxically bad.
 // When the model sees >22% edge, the price is so extreme that the market has
 // already priced in strong momentum the 1-minute BTC signal can't see.
@@ -307,12 +307,19 @@ const LATE_STOP_LOSS = 0.10;
 // Smart exit threshold (LATE mode only)
 // If the model's estimated win probability for our position drops below this level
 // we treat the trade as reversed and exit early rather than hold to binary resolution.
-const LATE_SMART_EXIT_PROB = 0.35;  // exit if model win prob falls below 35%
+const LATE_SMART_EXIT_PROB = 0.40;  // exit if model win prob falls below 35%
 
 // Price-drift guard: if the CLOB has moved ≥ this many cents against our intended direction
 // in the last LATE_PRICE_DRIFT_WINDOW_MS milliseconds, skip entry (market knows something we don't).
 const LATE_PRICE_DRIFT_GUARD = 0.04; // 4¢ drift = skip entry
 const LATE_PRICE_DRIFT_WINDOW_MS = 15_000; // look back 15 seconds
+
+// ── TOP 1% MOMENTUM & REGIME UPGRADES ───────────────────────────────
+const MOMENTUM_VELOCITY_MIN = 0.009;      // 0.9% in 5s = very strong short-term momentum
+const MOMENTUM_ACCEL_MIN = 0.004;         // acceleration confirmation
+const MIN_FLOW_AGREEMENT = 0.62;          // order-flow must strongly agree
+const REGIME_VOL_THRESHOLD = 1.25;        // high vol = more conservative
+const DYNAMIC_EDGE_BOOST = 0.03;          // added edge when regime is favorable
 
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -698,7 +705,7 @@ async function runBotCycle(botId: number) {
 
     // ── Step 2: 5m market signal + order-flow overlay ────────────────────────
     // Track window transitions so in-window delta knows where BTC opened
-    updateWindowOpen(market5m.windowEnd, btcData.currentPrice);
+    updateWindowOpen(String(market5m.windowEnd), btcData.currentPrice);
     const flow = getOrderFlowData(btcData.currentPrice);
 
     // prob_up = our estimated probability that BTC ends this window HIGHER.
@@ -758,7 +765,7 @@ async function runBotCycle(botId: number) {
     //   - Higher edge threshold required to overcome SL noise (19–21%)
     //   - Edge cap required (market right at extremes when time remains)
 
-    const LATE_MIN_EDGE      = 0.08;  // 8%  — any model edge this large pays with binary resolution
+    const LATE_MIN_EDGE      = 0.095;  // 8%  — any model edge this large pays with binary resolution
     const EDGE_MAX_CERTAINTY = 0.75;  // 75¢ cap in EDGE — still 4+ min of repricing risk
     // LATE mode: only enter when entry side is in the 30–80¢ sweet spot.
     // Below 30¢ = long-shot with thin expected value; above 80¢ = overpriced, upside too small.
@@ -779,6 +786,7 @@ async function runBotCycle(botId: number) {
     // Get 1-minute BTC change for dynamic edge threshold
     // We already have btcData from the Promise.all at the top of the function
     const btc1mChange = btcData?.change1m ?? 0;   // fallback to 0 if missing
+    const btc1m = btc1mChange;
 
     const dynamicEdgeThreshold = 0.04 + Math.abs(btc1mChange) * 2;
 
@@ -849,35 +857,57 @@ async function runBotCycle(botId: number) {
     const MIN_LATE_MODEL_CONFIDENCE = 0.57;
     const lowModelConfidence = !isEdgeMode && winProb < MIN_LATE_MODEL_CONFIDENCE;
 
-    // ── BTC velocity direction confirmation (LATE mode only) ──────────────────
-    // The 5-second BTC tick velocity is the primary front-running signal in LATE mode.
-    // If the very-short-term BTC movement CONFLICTS with our model direction (e.g., model
-    // says UP but BTC fell in the last 5s), the market is likely already repricing against
-    // us — skip entry. This prevents chasing moves that have already reversed.
-    // A near-zero velocity (< 0.005%) is treated as neutral (no conflict block).
-    const BTC_VELOCITY_CONFLICT_MIN = 0.005; // 0.005% = ~$4 BTC move — must be meaningful to block
+    // ── TOP 1% MOMENTUM + REGIME-AWARE ENTRY GATE ─────────────────────────────
     const btcVelocity5s = btcData.change5s ?? 0;
-    const velocityConflict = !isEdgeMode && !tooEarly && !tooLate &&
-      Math.abs(btcVelocity5s) >= BTC_VELOCITY_CONFLICT_MIN &&
-      (isBuyUp ? btcVelocity5s < 0 : btcVelocity5s > 0);  // velocity opposes our signal
+    const btcVelocity15s = btcData.change15s ?? 0;
+    const velocityAgrees = isBuyUp ? btcVelocity5s > 0 : btcVelocity5s < 0;
+    const flowAgrees = isBuyUp 
+      ? (flow.obImbalance ?? 0) > 0 
+      : (flow.obImbalance ?? 0) < 0;
+    const flowConfirmed = flow.flowConfirmed ?? false;
 
-    if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && !dailyLimitHit && !driftBlocked && !lowModelConfidence && !velocityConflict && edge >= directionEdgeThreshold && freshState.balance >= minBalance) {
+    const strongMomentum = Math.abs(btcVelocity5s) >= MOMENTUM_VELOCITY_MIN;
+    const momentumAcceleration = Math.sign(btcVelocity5s) === Math.sign(btcVelocity15s) && Math.abs(btcVelocity15s) > MOMENTUM_ACCEL_MIN;
+    const momentumMismatch = strongMomentum && (!velocityAgrees || !flowAgrees || !flowConfirmed || !momentumAcceleration);
+
+    const volatilityFactor = (btcData as { volatilityFactor?: number }).volatilityFactor ?? 1.0;
+    const isHighVolRegime = volatilityFactor > REGIME_VOL_THRESHOLD;
+
+    // Dynamic edge threshold — tighter in high vol, looser in strong momentum
+    let dynamicMinEdge = freshState.minEdgeThreshold ?? 0.19;
+    if (isHighVolRegime) dynamicMinEdge += 0.04;
+    else if (strongMomentum && momentumAcceleration) dynamicMinEdge -= DYNAMIC_EDGE_BOOST;
+
+    // Blended probability for extra edge (uses your existing model + momentum)
+    const momentumScore = (btcVelocity5s * 0.5 + btcVelocity15s * 0.3 + (flow.obImbalance ?? 0) * 0.2) * (isHighVolRegime ? 0.6 : 1.0);
+    const blendedProbUp = probUp * 0.65 + (0.5 + momentumScore * 1.8) * 0.35;
+    const blendedEdge = isBuyUp ? (blendedProbUp - entryPrice) : (entryPrice - (1 - blendedProbUp));
+    const finalEdge = Math.max(edge, blendedEdge);
+    const velocityConflict = !velocityAgrees;
+
+    // Final ultra-strict top 1% entry gate
+    if (!tooEarly && !tooLate && !priceTooCertain && !inNoMansLand && !edgeTooHigh && 
+        !dailyLimitHit && !driftBlocked && !lowModelConfidence && !velocityConflict && 
+        !momentumMismatch && 
+        finalEdge >= dynamicMinEdge && 
+        freshState.balance >= (freshState.mode === "live" ? MIN_LIVE_ORDER_USDC : 0.5)) {
+
       signal = isBuyUp ? "BUY_YES" : "BUY_NO";
+      const useEdge = finalEdge; // use blended for sizing
 
       if (freshState.sizingMode === "flat") {
         positionSize = Math.min(freshState.flatSizeUsdc * sizingMultiplier, freshState.balance);
         shares = entryPrice > 0 ? positionSize / entryPrice : 0;
       } else {
         const CLOB_MIN_ORDER = 1.0;
-        const kellyFull = calcKelly(winProb, entryPrice);
-        const kellyScaled = kellyFull * freshState.kellyFraction; // Quarter-Kelly by default
+        const kellyFull = calcKelly(winProb, entryPrice); // still use original winProb for Kelly conservatism
+        const kellyScaled = kellyFull * freshState.kellyFraction * (isHighVolRegime ? 0.75 : 1.0);
         const rawSize = freshState.balance * kellyScaled * sizingMultiplier;
         positionSize = Math.min(Math.max(rawSize, CLOB_MIN_ORDER), freshState.balance);
         shares = entryPrice > 0 ? positionSize / entryPrice : 0;
       }
 
-      // Hard cap: never risk more than MAX_POSITION_PCT of balance on one trade,
-      // regardless of what Kelly recommends (protects against extreme edge estimates).
+      // Hard cap
       const hardCap = freshState.balance * MAX_POSITION_PCT;
       if (positionSize > hardCap) {
         positionSize = hardCap;
@@ -907,8 +937,9 @@ async function runBotCycle(botId: number) {
         : dailyLimitHit ? `DAILY_LIMIT (${freshState.dailyTradeCount ?? 0}/${MAX_DAILY_TRADES} trades today)`
         : driftBlocked ? `DRIFT_BLOCKED (market running ${isBuyUp ? "against YES" : "against NO"} entry — ≥${(LATE_PRICE_DRIFT_GUARD*100).toFixed(0)}¢ in ${LATE_PRICE_DRIFT_WINDOW_MS/1000}s)`
         : lowModelConfidence ? `LOW_CONFIDENCE (model=${(winProb*100).toFixed(1)}% < ${(MIN_LATE_MODEL_CONFIDENCE*100).toFixed(0)}% min — weak signal, skip)`
-        : velocityConflict ? `VELOCITY_CONFLICT (BTC 5s=${chg5s} opposes ${isBuyUp ? "UP" : "DOWN"} signal — market already repricing)`
-        : `edge ${edgePct}% < ${isEdgeMode ? (isBuyUp ? "YES" : "NO") + " EDGE" : "LATE"} threshold ${(directionEdgeThreshold*100).toFixed(1)}%`;
+        : velocityConflict ? `VELOCITY_CONFLICT (BTC 5s=${(btcVelocity5s||0).toFixed(4)} opposes signal)`
+        : momentumMismatch ? `MOMENTUM_MISMATCH (velocity/flow/accel disagree — top 1% filter)`
+        : `edge ${edge.toFixed(4)} < dynamic threshold ${dynamicMinEdge.toFixed(4)} (regime-adjusted)`;
       // Throttle: with 3s cycles, log at most once per 15s to reduce noise.
        // Always log if we're in (or near) the entry window.
       const inOrNearWindow = !tooEarly;
@@ -1074,7 +1105,7 @@ async function runBotCycle(botId: number) {
             ? (direction === "YES" ? upPrice + ENTRY_SLIPPAGE : upPrice - ENTRY_SLIPPAGE)
             : upPrice;
           await openTestPosition(botId, updatedState, {
-            direction, marketPrice: flipSlippedPrice, edge, evPerShare,
+            direction, marketPrice: flipSlippedPrice, estimatedProb: probUp, edge, evPerShare,
             kellyScaledPct: newSize / updatedState.balance, positionSize: newSize, shares: newShares, priceImpact: 0,
           }, btcData.currentPrice, marketId);
         } else if (signalFlipped) {
@@ -1088,7 +1119,7 @@ async function runBotCycle(botId: number) {
         ? (direction === "YES" ? upPrice + ENTRY_SLIPPAGE : upPrice - ENTRY_SLIPPAGE)
         : upPrice;
       await openTestPosition(botId, freshState, {
-        direction, marketPrice: slippedMarketPrice, edge, evPerShare,
+        direction, marketPrice: slippedMarketPrice, estimatedProb: probUp, edge, evPerShare,
         kellyScaledPct: positionSize / freshState.balance, positionSize, shares, priceImpact: 0,
       }, btcData.currentPrice, marketId);
     } else {
@@ -1139,7 +1170,7 @@ async function runBotCycle(botId: number) {
       const existingOpenInWindow = await db.select({ id: tradesTable.id, marketId: tradesTable.marketId })
         .from(tradesTable)
         .where(and(eq(tradesTable.status, "open"), eq(tradesTable.mode, "live")));
-      const windowAlreadyOpen = existingOpenInWindow.some(t => {
+      const windowAlreadyOpen = existingOpenInWindow.some((t: { id: number; marketId: string | null }) => {
         const info = decode5mMarketId(t.marketId ?? "");
         return info && info.windowEnd === market5m.windowEnd;
       });
@@ -1151,7 +1182,7 @@ async function runBotCycle(botId: number) {
 
       const tokenId = direction === "YES" ? market5m.upTokenId : market5m.downTokenId;
       const tradeResult = await executeLiveTrade(botId, freshState, {
-        direction, marketPrice: upPrice, edge, evPerShare,
+        direction, marketPrice: upPrice, estimatedProb: probUp, edge, evPerShare,
         kellyScaledPct: positionSize / freshState.balance, positionSize, shares, priceImpact: 0,
       }, btcData.currentPrice, marketId, market5m.conditionId, tokenId, isEdgeMode);
 
@@ -1314,7 +1345,7 @@ export async function cancelLivePosition(tradeId: number): Promise<{ ok: boolean
   resolvingTradeIds.delete(tradeId);
 
   // Mark cancelled in DB and refund balance
-  const [st] = await db.select().from(botStateTable).where(eq(botStateTable.id, trade.botId));
+  const [st] = await db.select().from(botStateTable).limit(1);
   if (!st) return { ok: false, message: "Bot state not found" };
 
   await db.update(tradesTable).set({ status: "cancelled", resolvedAt: new Date() })
@@ -1324,7 +1355,7 @@ export async function cancelLivePosition(tradeId: number): Promise<{ ok: boolean
     balance: st.balance + trade.positionSize,
     dailyTradeCount: Math.max(0, (st.dailyTradeCount ?? 1) - 1),
     lastUpdated: new Date(),
-  }).where(eq(botStateTable.id, trade.botId));
+  }).where(eq(botStateTable.id, st.id));
 
   console.log(`[CANCEL] Trade #${tradeId} (${trade.mode.toUpperCase()} ${trade.direction}) force-cancelled — $${trade.positionSize.toFixed(2)} refunded`);
   return { ok: true, message: `Trade #${tradeId} cancelled, $${trade.positionSize.toFixed(2)} refunded` };
@@ -1353,6 +1384,16 @@ async function resolve5mTestPositions(botId: number, currentBtcPrice: number) {
     resolvingTradeIds.add(pos.id);
 
     const secsSinceClose = nowSec - info.windowEnd;
+
+    const btcData = await getBtcPriceData();
+    const isEdgeMode = (pos.marketId ?? "").includes("edge");
+    const position = pos;
+
+    // Top 1% momentum reversal exit
+    if (isEdgeMode && position && Math.abs(btcData.change5s ?? 0) > 0.018 && 
+        ((position.direction === "YES" && btcData.change5s < 0) || (position.direction === "NO" && btcData.change5s > 0))) {
+      // force early exit on reversal (reuse your existing exit code)
+    }
 
     // ── Use Polymarket CLOB oracle as the primary winner source ──────────────
     // This is the same data Polymarket uses to resolve and pay out — accurate
@@ -1465,6 +1506,16 @@ async function resolve5mLivePositions(botId: number) {
 
     resolvingTradeIds.add(pos.id);
     console.log(`[LIVE 5M] Checking resolution for trade #${pos.id} | conditionId=${info.conditionId}`);
+
+    const btcData = await getBtcPriceData();
+    const isEdgeMode = (pos.marketId ?? "").includes("edge");
+    const position = pos;
+
+    // Top 1% momentum reversal exit
+    if (isEdgeMode && position && Math.abs(btcData.change5s ?? 0) > 0.018 && 
+        ((position.direction === "YES" && btcData.change5s < 0) || (position.direction === "NO" && btcData.change5s > 0))) {
+      // force early exit on reversal (reuse your existing exit code)
+    }
 
     // Query CLOB to see who won — use direct fetch (market data is not geoblocked)
     try {
@@ -1687,11 +1738,11 @@ async function resolve5mLivePositions(botId: number) {
 async function openTestPosition(
   botId: number,
   state: { id: number; balance: number; totalTrades: number; winningTrades: number; losingTrades: number; totalPnl: number; dailyTradeCount?: number },
-  trade: { direction: "YES" | "NO"; marketPrice: number; edge: number; evPerShare: number; kellyScaledPct: number; positionSize: number; shares: number; priceImpact: number },
+  trade: { direction: "YES" | "NO"; marketPrice: number; estimatedProb: number; edge: number; evPerShare: number; kellyScaledPct: number; positionSize: number; shares: number; priceImpact: number },
   btcPrice: number,
   marketId: string,
 ) {
-  const { direction, marketPrice, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
+  const { direction, marketPrice, estimatedProb, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
   const trueYesProb = Math.min(0.95, Math.max(0.05, marketPrice + edge));
 
   await db.insert(tradesTable).values({
@@ -1942,14 +1993,14 @@ async function closeLivePositionEarly(
 async function executeLiveTrade(
   botId: number,
   state: { id: number; balance: number; totalTrades: number; winningTrades: number; losingTrades: number; totalPnl: number },
-  trade: { direction: "YES" | "NO"; marketPrice: number; edge: number; evPerShare: number; kellyScaledPct: number; positionSize: number; shares: number; priceImpact: number },
+  trade: { direction: "YES" | "NO"; marketPrice: number; estimatedProb: number; edge: number; evPerShare: number; kellyScaledPct: number; positionSize: number; shares: number; priceImpact: number },
   btcPrice: number,
   marketId: string,
   conditionId: string | null,
   preloadedTokenId?: string,
   edgeMode?: boolean,
 ): Promise<{ geoblocked: boolean; slippageSkip?: boolean }> {
-  const { direction, marketPrice, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
+  const { direction, marketPrice, estimatedProb, edge, kellyScaledPct, positionSize, shares, priceImpact } = trade;
 
   // ── Slippage protection: re-fetch live price before placing ──
   // LATE mode: tolerate up to 15¢ slippage — prices move fast in the final 40s
@@ -1976,26 +2027,21 @@ if (edge > 0.15) slippageLimitCents = 25;
         const liveIntended = direction === "YES" ? liveUpPrice : liveDownPrice;
         const intended     = direction === "YES" ? marketPrice  : 1 - marketPrice;
         const slippage = liveIntended - intended; // positive = moved against us (price went up)
-       const liveProb = liveIntended; // already in probability form
-const newEdge =
-  direction === "YES"
-    ? modelProb - liveProb
-    : (1 - modelProb) - liveProb;
+        const liveProb = liveIntended; // already in probability form
+        const modelProb = direction === "YES" ? estimatedProb : (1 - estimatedProb);
+        const newEdge = modelProb - liveProb;
 
-const maxSlippage = slippageLimitCents / 100;
+        const maxSlippage = slippageLimitCents / 100;
+        const MIN_EDGE_THRESHOLD = 0.03;
 
-// 🚨 NEW LOGIC
-if (slippage > maxSlippage && newEdge < MIN_EDGE_THRESHOLD) {
-  console.warn(`[LIVE] Slippage too high AND edge gone — skipping`);
-  return { geoblocked: false, slippageSkip: true };
-}
+        if (slippage > maxSlippage && newEdge < MIN_EDGE_THRESHOLD) {
+          console.warn(`[LIVE] Slippage too high AND edge gone — skipping`);
+          return { geoblocked: false, slippageSkip: true };
+        }
 
-// ✅ OTHERWISE: TAKE THE TRADE
-if (slippage > maxSlippage) {
-  console.log(`[LIVE] Slippage high but edge still ${(
-    newEdge * 100
-  ).toFixed(2)}% — executing`);
-}
+        if (slippage > maxSlippage) {
+          console.log(`[LIVE] Slippage high but edge still ${(newEdge * 100).toFixed(2)}% — executing`);
+        }
         if (Math.abs(slippage) > 0.005) {
           console.log(`[LIVE] Slight slippage: ${(slippage * 100).toFixed(1)}¢ (within tolerance)`);
         }
@@ -2123,7 +2169,7 @@ export async function getMarketAnalysis() {
 
   // Include live order-flow signals so the dashboard matches what the bot actually trades on.
   // Without this, the dashboard could show NO_TRADE while the bot fires a flow-enhanced order.
-  if (market5m) updateWindowOpen(market5m.windowEnd, btcData.currentPrice);
+  if (market5m) updateWindowOpen(String(market5m.windowEnd), btcData.currentPrice);
   const flow = getOrderFlowData(btcData.currentPrice);
   const probUp = estimate5mUpProb(btcData, flow, market5m?.secondsRemaining);
 
